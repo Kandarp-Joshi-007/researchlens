@@ -1,9 +1,17 @@
-import os
-import re
+"""Shared LLM setup and structured scoring for the assessment agents."""
 
+import logging
+import os
+from typing import List, Optional
+
+import httpx
 from langchain_ollama import ChatOllama
+from pydantic import BaseModel, Field, ValidationError
+
+log = logging.getLogger(__name__)
 
 LLM_MODEL = os.getenv("RESEARCHLENS_MODEL", "qwen2.5:7b")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 # Ollama defaults to a 2048-token window regardless of what the model supports,
 # which silently truncates long prompts. Sized for a 4 GB card: the KV cache at
@@ -15,7 +23,33 @@ NUM_CTX = int(os.getenv("RESEARCHLENS_NUM_CTX", "8192"))
 CHARS_PER_TOKEN = 4
 
 
-def get_llm(temperature: float = 0.0, num_ctx: int = None) -> ChatOllama:
+class AgentVerdict(BaseModel):
+    """One agent's assessment of a paper."""
+
+    score: float = Field(ge=0, le=10, description="Score from 0 to 10")
+    rationale: str = Field(description="One paragraph explaining the score")
+    key_points: List[str] = Field(default_factory=list, description="3-5 short bullets")
+    evidence: List[str] = Field(
+        default_factory=list,
+        description="Verbatim quotes from the paper supporting the assessment",
+    )
+
+
+# json_mode does not constrain the shape, so the prompt has to specify it.
+FORMAT_INSTRUCTIONS = """
+Respond with a single JSON object and nothing else, in exactly this shape:
+{{
+  "score": <number 0-10>,
+  "rationale": "<one paragraph explaining the score>",
+  "key_points": ["<short bullet>", "<short bullet>", "<short bullet>"],
+  "evidence": ["<verbatim quote from the paper>", "<verbatim quote from the paper>"]
+}}
+Every entry in "evidence" must be copied word-for-word from the excerpts provided.
+Do not invent quotes. If the excerpts do not support a confident judgement, say so
+in the rationale and score accordingly."""
+
+
+def get_llm(temperature: float = 0.0, num_ctx: Optional[int] = None) -> ChatOllama:
     return ChatOllama(
         model=LLM_MODEL,
         temperature=temperature,
@@ -28,31 +62,56 @@ def context_budget_chars(reserve_tokens: int = 1200) -> int:
     return max(0, (NUM_CTX - reserve_tokens) * CHARS_PER_TOKEN)
 
 
-def parse_score_response(text: str) -> dict:
-    """Extract score, rationale, and key_points from LLM response."""
-    score = None
-    score_match = re.search(r"(?:score|SCORE)[:\s]+([0-9]{1,2}(?:\.[0-9])?)\s*/?\s*10", text, re.I)
-    if score_match:
-        score = float(score_match.group(1))
+_structured_method: Optional[str] = None
 
-    if score is None:
-        # Only accept standalone numbers that are plausible scores (0-10)
-        nums = re.findall(r"(?<!\d)([0-9](?:\.[0-9])?|10)(?!\d)", text)
-        score_candidates = [float(n) for n in nums if 0.0 <= float(n) <= 10.0]
-        if score_candidates:
-            score = score_candidates[0]
 
-    score = max(0.0, min(10.0, score or 5.0))
+def _pick_structured_method() -> str:
+    """Schema-constrained decoding needs Ollama >= 0.5.0; older servers get JSON mode.
 
-    key_points = []
-    bullet_matches = re.findall(r"[-•*]\s+(.+)", text)
-    numbered_matches = re.findall(r"\d+\.\s+(.+)", text)
-    key_points = (bullet_matches or numbered_matches)[:5]
+    Older servers reject a schema object with 'cannot unmarshal object into Go
+    struct field ChatRequest.format of type string'.
+    """
+    global _structured_method
+    if _structured_method is not None:
+        return _structured_method
 
-    rationale_match = re.search(
-        r"(?:rationale|reasoning|justification|explanation)[:\s]+(.+?)(?:\n\n|\Z)",
-        text, re.I | re.S
-    )
-    rationale = rationale_match.group(1).strip() if rationale_match else text[:500]
+    _structured_method = "json_mode"
+    try:
+        version = httpx.get(f"{OLLAMA_HOST}/api/version", timeout=3.0).json().get("version", "0")
+        parts = [int(p) for p in version.split(".")[:3] if p.isdigit()]
+        if parts >= [0, 5]:
+            _structured_method = "json_schema"
+        log.info("Ollama %s -> structured output via %s", version, _structured_method)
+    except Exception as exc:  # server down or unreachable; JSON mode is the safe default
+        log.warning("Could not read Ollama version (%s); using json_mode", exc)
 
-    return {"score": score, "rationale": rationale, "key_points": key_points}
+    return _structured_method
+
+
+def score_with_agent(prompt, variables: dict, temperature: float = 0.0,
+                     attempts: int = 3) -> AgentVerdict:
+    """Run a scoring prompt and return a validated verdict.
+
+    Retries on malformed output. Raises if every attempt fails, so a broken
+    agent surfaces as an error rather than a silent default score.
+    """
+    method = _pick_structured_method()
+    last_error = None
+
+    for attempt in range(attempts):
+        # Nudge off a bad generation path on retry rather than repeating it.
+        temp = temperature if attempt == 0 else max(temperature, 0.3)
+        try:
+            llm = get_llm(temperature=temp).with_structured_output(
+                AgentVerdict, method=method
+            )
+            result = (prompt | llm).invoke(variables)
+            if result is None:
+                raise ValueError("model returned no parseable JSON")
+            return result
+        except (ValidationError, ValueError, KeyError, TypeError) as exc:
+            last_error = exc
+            log.warning("Structured output attempt %d/%d failed: %s",
+                        attempt + 1, attempts, str(exc)[:200])
+
+    raise RuntimeError(f"Agent failed to produce a valid verdict: {last_error}")

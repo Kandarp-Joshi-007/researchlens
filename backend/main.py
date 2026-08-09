@@ -14,12 +14,10 @@ from backend.core.pdf_extractor import extract_text, chunk_text
 from backend.core.database import init_db, save_paper, save_score, save_summary, get_all_results, get_paper_scores, get_paper_summary, delete_paper
 from backend.core.vectorstore import add_chunks, similarity_search, delete_paper_chunks
 from backend.agents.base import get_llm
+from backend.agents.definitions import AGENTS, overall_score, verdict_for
+from backend.agents import runner
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.output_parser import StrOutputParser
-import backend.agents.patentability as patent_agent
-import backend.agents.licensing as license_agent
-import backend.agents.spinout as spinout_agent
-import backend.agents.risk as risk_agent
 
 UPLOAD_DIR = Path(__file__).parent.parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -80,36 +78,17 @@ def _process_paper(paper_id: int, paper_data: dict):
         chunks = chunk_text(paper_data["full_text"])
         add_chunks(paper_id, chunks, {"title": paper_data["title"], "filename": paper_data.get("title", "")})
 
-        agents = [
-            ("patentability", patent_agent),
-            ("licensing", license_agent),
-            ("spinout", spinout_agent),
-            ("risk", risk_agent),
-        ]
         scores = {}
-        for name, agent in agents:
-            _status[paper_id]["stage"] = f"scoring:{name}"
-            result = agent.run(paper_data)
-            save_score(paper_id, name, result["score"], result["rationale"], result["key_points"])
-            scores[name] = result["score"]
+        for spec in AGENTS:
+            _status[paper_id]["stage"] = f"scoring:{spec['name']}"
+            result = runner.run(spec, paper_data)
+            save_score(paper_id, spec["name"], result["score"],
+                       result["rationale"], result["key_points"])
+            scores[spec["name"]] = result["score"]
 
-        # Overall = weighted average; risk is inverted (lower risk = better)
-        overall = (
-            scores["patentability"] * 0.30
-            + scores["licensing"] * 0.30
-            + scores["spinout"] * 0.25
-            + (10 - scores["risk"]) * 0.15
-        )
-
-        if overall >= 7.5:
-            verdict = "Strong Commercialisation Potential"
-        elif overall >= 5.0:
-            verdict = "Moderate Potential — Further Assessment Recommended"
-        else:
-            verdict = "Limited Commercialisation Potential"
-
-        save_summary(paper_id, round(overall, 2), verdict)
-        _status[paper_id] = {"stage": "done", "done": True, "error": None, "overall": round(overall, 2)}
+        overall = overall_score(scores)
+        save_summary(paper_id, overall, verdict_for(overall))
+        _status[paper_id] = {"stage": "done", "done": True, "error": None, "overall": overall}
 
     except Exception as e:
         _status[paper_id] = {"stage": "error", "done": False, "error": str(e)}
