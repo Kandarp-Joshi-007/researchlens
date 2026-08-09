@@ -1,0 +1,27 @@
+# Core LLM & embeddings
+ollama
+langchain==0.3.25
+langchain-ollama==0.3.2
+langchain-community==0.3.23
+langchain-chroma==0.2.4
+
+# Vector store & DB
+chromadb>=1.0.9
+# SQLite is stdlib
+
+# PDF extraction
+pymupdf==1.25.5
+
+# API & UI
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+streamlit==1.45.0
+python-multipart==0.0.20
+
+# HTTP client
+httpx==0.28.1
+requests==2.32.3
+
+# Data
+pydantic==2.11.3
+python-dotenv==1.1.0

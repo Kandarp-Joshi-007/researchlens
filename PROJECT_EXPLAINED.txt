@@ -1,0 +1,199 @@
+================================================================
+  RESEARCHLENS — PROJECT EXPLANATION
+================================================================
+
+WHAT IS RESEARCHLENS?
+---------------------
+ResearchLens is an AI-powered tool that reads academic research
+papers (PDFs) and automatically evaluates how commercially
+valuable they are. It answers the question:
+
+  "Should this research be patented, licensed, or spun out
+   into a startup — and how risky is it to do so?"
+
+It is designed for technology transfer offices, investors, and
+researchers who need a fast, structured opinion on a paper's
+commercial potential without manually reading and analysing it.
+
+
+----------------------------------------------------------------
+HOW WE BUILT IT
+----------------------------------------------------------------
+
+The project is split into two parts that talk to each other:
+
+  1. Backend  — a REST API built with FastAPI (Python)
+  2. Frontend — a web UI built with Streamlit (Python)
+
+All AI work runs 100% locally on your machine using Ollama,
+which means no data leaves your computer and there are no API
+costs.
+
+TECHNOLOGY STACK:
+
+  - FastAPI        : handles HTTP requests (upload, scoring, Q&A)
+  - Streamlit      : the browser-based user interface
+  - Ollama         : runs the local AI models
+  - qwen2.5:7b     : the main language model (does the scoring
+                     and answering)
+  - nomic-embed-text : embedding model (converts text to vectors
+                       for similarity search)
+  - ChromaDB       : vector database (stores text embeddings for
+                     the Q&A feature)
+  - SQLite         : relational database (stores papers, scores,
+                     results — saved in results.db)
+  - PyMuPDF        : extracts raw text from PDF files
+  - LangChain      : connects prompts, the LLM, and output
+                     parsing into clean pipelines
+
+
+----------------------------------------------------------------
+HOW IT WORKS — STEP BY STEP
+----------------------------------------------------------------
+
+STEP 1: Upload
+  You upload a PDF through the Streamlit UI. The file is sent
+  to the FastAPI backend, saved to the /uploads folder, and
+  given a unique ID. Basic metadata (title, author, page count)
+  is extracted from the PDF and stored in SQLite.
+
+STEP 2: Text Extraction
+  PyMuPDF reads every page of the PDF block by block. It
+  automatically detects section headings (Abstract, Methods,
+  Results, Conclusion, etc.) by checking if a short line
+  matches known keywords. The full text and each section are
+  stored separately so agents can read the most relevant part.
+
+STEP 3: Embedding (for Q&A)
+  The full text is split into overlapping chunks of ~800 words
+  (with 100-word overlaps so context is not lost at boundaries).
+  Each chunk is converted into a vector (a list of numbers that
+  captures its meaning) using the nomic-embed-text model via
+  Ollama. These vectors are stored in ChromaDB, linked to the
+  paper's ID.
+
+STEP 4: Scoring — Four AI Agents
+  Four separate AI agents each read relevant sections of the
+  paper and return a score out of 10 with a rationale and
+  bullet-point key findings. Each agent has a specific expert
+  persona baked into its system prompt:
+
+  Agent 1 — PATENTABILITY (weight: 30%)
+    Persona: Patent attorney
+    Evaluates: novelty, non-obviousness, utility, enablement
+    Question: "Could this be patented?"
+
+  Agent 2 — LICENSING (weight: 30%)
+    Persona: Technology licensing expert
+    Evaluates: market size, ease of adoption, industry fit,
+               existing IP landscape
+    Question: "Could a company license and sell this?"
+
+  Agent 3 — SPINOUT (weight: 25%)
+    Persona: Venture capital analyst
+    Evaluates: TRL (technology readiness), market opportunity,
+               competitive moat, team capability signals
+    Question: "Could this become a startup?"
+
+  Agent 4 — RISK (weight: 15%)
+    Persona: Technology risk analyst
+    Evaluates: regulatory hurdles, ethical concerns, technical
+               maturity, replication challenges
+    Note: this score is INVERTED — a high risk score is BAD.
+    Question: "What could block this from reaching market?"
+
+STEP 5: Overall Score Calculation
+  The four scores are combined into one overall score using a
+  weighted formula:
+
+    Overall = (Patentability × 0.30)
+            + (Licensing      × 0.30)
+            + (Spinout        × 0.25)
+            + (10 - Risk)     × 0.15
+
+  The risk score is subtracted from 10 before weighting so that
+  a high-risk paper is penalised, not rewarded.
+
+  The overall score produces a verdict:
+    >= 7.5  →  "Strong Commercialisation Potential"
+    >= 5.0  →  "Moderate Potential — Further Assessment Recommended"
+    <  5.0  →  "Limited Commercialisation Potential"
+
+STEP 6: Ask the Paper (RAG Q&A)
+  Once a paper is processed, you can ask it free-text questions
+  (e.g. "What dataset was used?" or "What are the limitations?").
+
+  This uses Retrieval-Augmented Generation (RAG):
+    1. Your question is converted to a vector using
+       nomic-embed-text.
+    2. ChromaDB finds the 5 most semantically similar chunks
+       from that paper.
+    3. Those chunks are passed as context to qwen2.5:7b along
+       with your question.
+    4. The model answers using only the paper's own text —
+       it cannot hallucinate facts from outside the paper.
+
+
+----------------------------------------------------------------
+WHY SCORES ARE CONSISTENT (after the fix)
+----------------------------------------------------------------
+The LLM temperature is set to 0.0. Temperature controls how
+random the model is when picking its next word. At 0.0 it always
+picks the most likely word, making outputs fully deterministic —
+the same paper always produces the same score.
+
+
+----------------------------------------------------------------
+FILE STRUCTURE
+----------------------------------------------------------------
+
+  ResearchLens/
+  |
+  |-- backend/
+  |   |-- main.py              API routes (upload, status,
+  |   |                        results, query)
+  |   |-- agents/
+  |   |   |-- base.py          LLM setup + score parser
+  |   |   |-- patentability.py Patent scoring agent
+  |   |   |-- licensing.py     Licensing scoring agent
+  |   |   |-- spinout.py       Spinout scoring agent
+  |   |   |-- risk.py          Risk scoring agent
+  |   |-- core/
+  |       |-- pdf_extractor.py PDF text + section extraction
+  |       |-- vectorstore.py   ChromaDB read/write
+  |       |-- database.py      SQLite read/write
+  |
+  |-- frontend/
+  |   |-- app.py               Streamlit UI
+  |
+  |-- data/
+  |   |-- chroma/              Vector embeddings (ChromaDB)
+  |   |-- results.db           Paper scores (SQLite)
+  |
+  |-- uploads/                 Uploaded PDF files
+  |-- requirements.txt         Python dependencies
+  |-- run.sh                   Starts backend + frontend together
+
+
+----------------------------------------------------------------
+HOW TO RUN
+----------------------------------------------------------------
+
+  1. Make sure Ollama is running:
+       ollama serve
+
+  2. Make sure the required models are downloaded:
+       ollama pull qwen2.5:7b
+       ollama pull nomic-embed-text
+
+  3. Install Python dependencies (first time only):
+       pip install -r requirements.txt
+
+  4. Start everything:
+       bash run.sh
+
+  5. Open your browser:
+       http://localhost:8501    (UI)
+       http://localhost:8000    (API)
+
+================================================================
