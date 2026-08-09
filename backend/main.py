@@ -56,7 +56,16 @@ async def upload_paper(background_tasks: BackgroundTasks, file: UploadFile = Fil
     with dest.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    paper_data = extract_text(str(dest))
+    try:
+        paper_data = extract_text(str(dest))
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, f"Could not read PDF: {exc}")
+
+    if paper_data["char_count"] < 200:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(422, "No extractable text found — is this a scanned PDF?")
+
     paper_id = save_paper(file.filename, paper_data["title"], paper_data["author"], paper_data["page_count"], filepath=str(dest))
 
     _status[paper_id] = {"stage": "embedding", "done": False, "error": None}
