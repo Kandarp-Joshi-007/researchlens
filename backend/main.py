@@ -81,7 +81,7 @@ def _process_paper(paper_id: int, paper_data: dict):
         scores = {}
         for spec in AGENTS:
             _status[paper_id]["stage"] = f"scoring:{spec['name']}"
-            result = runner.run(spec, paper_data)
+            result = runner.run(spec, paper_data, paper_id=paper_id)
             save_score(paper_id, spec["name"], result["score"],
                        result["rationale"], result["key_points"])
             scores[spec["name"]] = result["score"]

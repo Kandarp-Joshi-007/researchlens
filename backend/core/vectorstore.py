@@ -26,11 +26,27 @@ def add_chunks(paper_id: int, chunks: list[str], metadata: dict):
     vs.add_texts(texts=chunks, metadatas=metas, ids=ids)
 
 
-def similarity_search(query: str, k: int = 4, paper_id: int = None) -> list[str]:
+def similarity_search(query: str, k: int = 4, paper_id: int = None) -> list:
     vs = get_vectorstore()
     filter_dict = {"paper_id": paper_id} if paper_id else None
     docs = vs.similarity_search(query, k=k, filter=filter_dict)
     return [d.page_content for d in docs]
+
+
+def retrieve_for_queries(queries: list, paper_id: int, k_per_query: int = 2) -> list:
+    """Chunks matching any of several queries, deduped and back in reading order.
+
+    Retrieval returns chunks ranked by similarity; restoring document order
+    keeps the excerpts readable as a narrative rather than a jumble.
+    """
+    vs = get_vectorstore()
+    found = {}
+    for query in queries:
+        docs = vs.similarity_search(query, k=k_per_query, filter={"paper_id": paper_id})
+        for doc in docs:
+            index = doc.metadata.get("chunk_index", len(found))
+            found.setdefault(index, doc.page_content)
+    return [found[i] for i in sorted(found)]
 
 
 def delete_paper_chunks(paper_id: int):
