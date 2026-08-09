@@ -23,3 +23,6 @@ data/*.db
 .idea/
 Thumbs.db
 desktop.ini
+
+# Claude runtime
+.claude/scheduled_tasks.lock
