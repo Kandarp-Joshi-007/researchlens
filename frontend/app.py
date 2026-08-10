@@ -29,7 +29,13 @@ with st.sidebar:
             data = resp.json()
             st.session_state["active_paper_id"] = data["paper_id"]
             st.session_state["active_title"] = data["title"]
-            st.success(f"Uploaded: {data['title']} ({data['pages']} pages)")
+            if data.get("duplicate"):
+                st.info(
+                    f"Already analysed: {data['title']} — showing the saved "
+                    f"result ({data.get('overall')}/10)."
+                )
+            else:
+                st.success(f"Uploaded: {data['title']} ({data['pages']} pages)")
         else:
             st.error(f"Upload failed: {resp.text}")
 
@@ -137,6 +143,38 @@ def show_results(paper_id: int):
                         st.markdown("**Key Points**")
                         for pt in s["key_points"]:
                             st.markdown(f"- {pt}")
+
+                    evidence = s.get("evidence") or []
+                    if evidence:
+                        with st.expander(f"Evidence from the paper ({len(evidence)})"):
+                            for quote in evidence:
+                                st.markdown(
+                                    f"<div style='border-left:3px solid {AGENT_COLORS[key]};"
+                                    f"padding:6px 0 6px 12px;margin-bottom:10px;color:inherit;"
+                                    f"font-style:italic;opacity:.85'>“{quote}”</div>",
+                                    unsafe_allow_html=True,
+                                )
+                    else:
+                        st.caption("No evidence quotes recorded for this score.")
+
+    # ── Prior art ─────────────────────────────────────────────────────────────
+    works = data.get("prior_art") or []
+    if works:
+        st.markdown("---")
+        st.subheader("Prior Art")
+        st.caption("Similar published work from OpenAlex, used to ground the "
+                   "patentability assessment.")
+        for work in works:
+            year = work.get("year") or "n.d."
+            venue = work.get("venue") or "—"
+            doi = work.get("doi")
+            title = f"[{work['title']}]({doi})" if doi else work["title"]
+            st.markdown(
+                f"- {title}  \n"
+                f"  <span style='color:#888;font-size:.85em'>{work.get('authors') or 'Unknown'} · "
+                f"{year} · {venue} · cited {work.get('citations', 0)}×</span>",
+                unsafe_allow_html=True,
+            )
 
     # ── Q&A section ───────────────────────────────────────────────────────────
     st.markdown("---")

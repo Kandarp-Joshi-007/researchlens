@@ -35,13 +35,23 @@ AGENTS = [
             "specific method, architecture, algorithm or apparatus described",
             "technical advantage over existing approaches",
         ],
+        # Novelty cannot be judged from the paper alone, so this agent is given
+        # real published work to compare against.
+        "uses_prior_art": True,
         "prompt": _prompt(
             """You are a patent attorney evaluating research papers for patentability.
 Assess novelty, non-obviousness, utility, and enablement.
 Score 1-10 where 10 = highly patentable (novel, non-obvious, clear utility,
 sufficiently enabled). A survey or review paper that contributes no new
-technical method should score low on novelty.""",
-            _EXCERPTS + "\nEvaluate this research for patentability.",
+technical method should score low on novelty.
+Judge novelty against the PRIOR ART listed below: if closely related work already
+exists, say so explicitly in your rationale and lower the score accordingly. If no
+prior art was retrieved, judge on the paper alone and note that limitation.""",
+            _EXCERPTS + """
+PRIOR ART (similar published work retrieved from OpenAlex):
+{prior_art}
+
+Evaluate this research for patentability, comparing it against the prior art above.""",
         ),
     },
     {

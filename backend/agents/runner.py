@@ -2,6 +2,7 @@
 
 import logging
 
+from ..core.prior_art import format_for_prompt
 from ..core.vectorstore import retrieve_for_queries
 from .base import AgentVerdict, context_budget_chars, score_with_agent
 
@@ -73,14 +74,16 @@ def _sections_context(paper_data: dict, budget: int) -> str:
 
 
 def run(spec: dict, paper_data: dict, paper_id: int = None,
-        context: str = None) -> dict:
+        context: str = None, prior_art: list = None) -> dict:
     """Score one paper with one agent."""
     if context is None:
         context = build_context(paper_data, spec, paper_id=paper_id)
-    verdict: AgentVerdict = score_with_agent(
-        spec["prompt"],
-        {"title": paper_data.get("title", "Unknown"), "context": context},
-    )
+
+    variables = {"title": paper_data.get("title", "Unknown"), "context": context}
+    if spec.get("uses_prior_art"):
+        variables["prior_art"] = format_for_prompt(prior_art or [])
+
+    verdict: AgentVerdict = score_with_agent(spec["prompt"], variables)
     log.info("%s scored %.1f (%d chars of context)",
              spec["name"], verdict.score, len(context))
     return {
