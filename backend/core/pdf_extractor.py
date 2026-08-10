@@ -264,7 +264,9 @@ def extract_text(pdf_path: str) -> dict:
 
     # Fallback for PDFs with no detectable heading structure (scans, preprints,
     # unusual templates): keep every non-boilerplate line rather than nothing.
-    if len(full_text) < 500:
+    # Only when structure detection produced essentially nothing — a short but
+    # correctly parsed paper must keep its sections.
+    if not sections_ordered or len(full_text) < 200:
         salvaged = []
         for block in (b for blocks in pages_blocks for b in blocks):
             if _is_margin_matter(block, body_left):
@@ -275,10 +277,12 @@ def extract_text(pdf_path: str) -> dict:
                 if re.sub(r"\d+", "#", text) in running:
                     continue
                 salvaged.append(text)
-        full_text = " ".join(salvaged).strip()
-        if full_text and not sections:
-            sections = {"abstract": full_text[:4000]}
-            sections_ordered = [{"heading": "Document", "text": full_text}]
+        salvaged_text = " ".join(salvaged).strip()
+        if len(salvaged_text) > len(full_text):
+            full_text = salvaged_text
+            if not sections:
+                sections = {"abstract": full_text[:4000]}
+                sections_ordered = [{"heading": "Document", "text": full_text}]
 
     meta = dict(doc.metadata) if doc.metadata else {}
     title = str(meta.get("title", "") or "").strip() or _title_from_layout(doc) \
