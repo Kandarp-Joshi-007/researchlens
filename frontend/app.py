@@ -3,6 +3,39 @@ import requests
 import streamlit as st
 
 API_BASE = "http://localhost:8000"
+API_TIMEOUT = 30
+
+
+class ApiError(Exception):
+    """A request to the backend failed or returned an error status."""
+
+
+def api(method: str, path: str, timeout: int = API_TIMEOUT, **kwargs):
+    """Call the backend, turning transport and HTTP errors into one exception.
+
+    Without this every call site can raise ConnectionError and surface a raw
+    traceback in the UI when the backend is not running.
+    """
+    try:
+        response = requests.request(method, f"{API_BASE}{path}",
+                                    timeout=timeout, **kwargs)
+    except requests.Timeout:
+        raise ApiError("The backend did not respond in time.")
+    except requests.RequestException:
+        raise ApiError("Could not reach the API — is the backend running?")
+
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            detail = response.json().get("detail", detail)
+        except ValueError:
+            pass
+        raise ApiError(str(detail)[:300])
+
+    try:
+        return response.json()
+    except ValueError:
+        raise ApiError("The backend returned an unreadable response.")
 
 st.set_page_config(
     page_title="ResearchLens",
@@ -30,26 +63,21 @@ with st.sidebar:
         progress = st.progress(0.0)
         for index, item in enumerate(uploaded_files, start=1):
             try:
-                resp = requests.post(
-                    f"{API_BASE}/upload",
+                data = api(
+                    "POST", "/upload",
                     files={"file": (item.name, item.getvalue(), "application/pdf")},
                     params={"deep": str(deep).lower()},
                     timeout=300,
                 )
-            except requests.RequestException as exc:
+            except ApiError as exc:
                 failed.append(f"{item.name}: {exc}")
                 continue
             finally:
                 progress.progress(index / len(uploaded_files))
 
-            if resp.ok:
-                data = resp.json()
-                (duplicates if data.get("duplicate") else queued).append(data)
-                st.session_state["active_paper_id"] = data["paper_id"]
-                st.session_state["active_title"] = data["title"]
-            else:
-                detail = resp.json().get("detail", resp.text) if resp.content else resp.text
-                failed.append(f"{item.name}: {detail}")
+            (duplicates if data.get("duplicate") else queued).append(data)
+            st.session_state["active_paper_id"] = data["paper_id"]
+            st.session_state["active_title"] = data["title"]
 
         progress.empty()
         if queued:
@@ -126,12 +154,7 @@ def score_bar(label: str, score: float, color: str, inverted: bool = False):
 
 
 def verdict_badge(verdict: str, overall: float):
-    if overall >= 7.5:
-        bg, fg = "#d4edda", "#155724"
-    elif overall >= 5.0:
-        bg, fg = "#fff3cd", "#856404"
-    else:
-        bg, fg = "#f8d7da", "#721c24"
+    bg, fg, _ = VERDICT_STYLES[verdict_band(overall) or "limited"]
     st.markdown(
         f"<div style='background:{bg};color:{fg};padding:12px 18px;border-radius:8px;"
         f"font-weight:700;font-size:1.05em'>{verdict}</div>",
@@ -140,23 +163,24 @@ def verdict_badge(verdict: str, overall: float):
 
 
 def show_results(paper_id: int):
-    resp = requests.get(f"{API_BASE}/results/{paper_id}")
-    if not resp.ok:
-        st.error("Could not load results.")
+    try:
+        data = api("GET", f"/results/{paper_id}")
+    except ApiError as exc:
+        st.error(f"Could not load results: {exc}")
         return
-    data = resp.json()
     scores = {s["agent"]: s for s in data["scores"]}
-    overall = data.get("overall", 0.0)
+    overall = data.get("overall") or 0.0
 
-    report = requests.get(f"{API_BASE}/papers/{paper_id}/report")
-    if report.ok:
-        payload = report.json()
+    try:
+        payload = api("GET", f"/papers/{paper_id}/report")
         st.download_button(
             "Download commercialisation brief",
             data=payload["markdown"],
             file_name=payload["filename"],
             mime="text/markdown",
         )
+    except ApiError:
+        pass  # the brief is optional; the on-screen results still stand
 
     col_score, col_detail = st.columns([1, 2])
 
@@ -260,17 +284,16 @@ def show_results(paper_id: int):
         with st.chat_message("user"):
             st.write(question)
         with st.chat_message("assistant"):
-            with st.spinner("Thinking…"):
-                qa_resp = requests.post(
-                    f"{API_BASE}/query/{paper_id}",
-                    json={"question": question},
-                )
-            if qa_resp.ok:
-                answer = qa_resp.json()["answer"]
+            try:
+                with st.spinner("Thinking…"):
+                    # Generation on a partly CPU-bound model is slow.
+                    payload = api("POST", f"/query/{paper_id}",
+                                  json={"question": question}, timeout=300)
+                answer = payload["answer"]
                 st.write(answer)
                 history.append({"q": question, "a": answer})
-            else:
-                st.error(f"Could not get an answer: {qa_resp.text}")
+            except ApiError as exc:
+                st.error(f"Could not get an answer: {exc}")
 
 
 # ── Active paper: poll until done ────────────────────────────────────────────
@@ -283,16 +306,11 @@ def render_progress(paper_id):
     every three seconds.
     """
     try:
-        status_resp = requests.get(f"{API_BASE}/status/{paper_id}", timeout=10)
-    except requests.RequestException as exc:
+        status = api("GET", f"/status/{paper_id}", timeout=10)
+    except ApiError as exc:
         st.warning(f"Lost contact with the API: {exc}")
         return
 
-    if not status_resp.ok:
-        st.warning("Could not read analysis status.")
-        return
-
-    status = status_resp.json()
     stage = status.get("stage", "unknown")
 
     if status.get("done"):
@@ -322,9 +340,9 @@ if "active_paper_id" in st.session_state:
     st.subheader(f"📄 {title}")
 
     try:
-        status_resp = requests.get(f"{API_BASE}/status/{paper_id}", timeout=10)
-        status = status_resp.json() if status_resp.ok else {}
-    except requests.RequestException:
+        status = api("GET", f"/status/{paper_id}", timeout=10)
+    except ApiError as exc:
+        st.warning(f"Could not read analysis status: {exc}")
         status = {}
 
     stage = status.get("stage", "unknown")
@@ -333,8 +351,11 @@ if "active_paper_id" in st.session_state:
     elif stage == "error":
         st.error(f"Processing failed: {status.get('error')}")
         if st.button("Re-analyse", key=f"retry_{paper_id}"):
-            requests.post(f"{API_BASE}/papers/{paper_id}/reanalyse")
-            st.rerun()
+            try:
+                api("POST", f"/papers/{paper_id}/reanalyse")
+                st.rerun()
+            except ApiError as exc:
+                st.error(f"Could not restart the analysis: {exc}")
     else:
         render_progress(paper_id)
 
@@ -388,10 +409,11 @@ def render_portfolio(rows):
                                  key="cmp_b")
 
         if labels[first] != labels[second]:
-            detail_a = requests.get(f"{API_BASE}/results/{labels[first]}")
-            detail_b = requests.get(f"{API_BASE}/results/{labels[second]}")
-            if detail_a.ok and detail_b.ok:
-                render_comparison(detail_a.json(), detail_b.json())
+            try:
+                render_comparison(api("GET", f"/results/{labels[first]}"),
+                                  api("GET", f"/results/{labels[second]}"))
+            except ApiError as exc:
+                st.warning(f"Could not load both papers: {exc}")
         else:
             st.caption("Pick two different papers to compare.")
 
@@ -431,11 +453,13 @@ def render_comparison(a, b):
 
 
 # ── Paper library ─────────────────────────────────────────────────────────────
-hist_resp = requests.get(f"{API_BASE}/results")
-if not hist_resp.ok:
-    st.warning("Could not reach the API. Make sure the backend is running.")
-else:
-    rows = hist_resp.json()
+try:
+    rows = api("GET", "/results")
+except ApiError as exc:
+    st.warning(f"{exc} Start it with: bash run.sh")
+    rows = None
+
+if rows is not None:
     render_portfolio(rows)
 
     st.markdown("---")
@@ -533,15 +557,15 @@ else:
                 with btn_right:
                     if st.session_state["delete_confirm"] == paper_id:
                         if st.button("Confirm", key=f"confirm_{paper_id}", type="primary", use_container_width=True):
-                            del_resp = requests.delete(f"{API_BASE}/papers/{paper_id}")
-                            if del_resp.ok:
+                            try:
+                                api("DELETE", f"/papers/{paper_id}")
                                 if st.session_state.get("active_paper_id") == paper_id:
                                     st.session_state.pop("active_paper_id", None)
                                     st.session_state.pop("active_title", None)
                                 st.session_state["delete_confirm"] = None
                                 st.rerun()
-                            else:
-                                st.error("Delete failed.")
+                            except ApiError as exc:
+                                st.error(f"Delete failed: {exc}")
                     else:
                         if st.button("Delete", key=f"delete_{paper_id}", use_container_width=True):
                             st.session_state["delete_confirm"] = paper_id

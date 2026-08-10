@@ -19,8 +19,18 @@ def get_vectorstore(collection: str = "papers") -> Chroma:
     )
 
 
-def add_chunks(paper_id: int, chunks: list[str], metadata: dict):
+def add_chunks(paper_id: int, chunks: list, metadata: dict):
+    """Replace this paper's embeddings.
+
+    Re-analysis can produce fewer chunks than the previous run (a better
+    extractor drops boilerplate). Ids are positional, so writing without
+    clearing first leaves the tail of the old run behind and retrieval then
+    mixes stale text with new.
+    """
     vs = get_vectorstore()
+    delete_paper_chunks(paper_id)
+    if not chunks:
+        return
     ids = [f"paper_{paper_id}_chunk_{i}" for i in range(len(chunks))]
     metas = [{**metadata, "paper_id": paper_id, "chunk_index": i} for i in range(len(chunks))]
     vs.add_texts(texts=chunks, metadatas=metas, ids=ids)

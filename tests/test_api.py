@@ -7,8 +7,14 @@ from conftest import make_pdf
 
 
 @pytest.fixture
-def client(temp_db, monkeypatch):
+def client(temp_db, monkeypatch, tmp_path):
     import backend.main as main
+
+    # Write uploads to a throwaway directory; otherwise the suite litters the
+    # real uploads/ folder with test PDFs.
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    monkeypatch.setattr(main, "UPLOAD_DIR", uploads)
 
     # Never call Ollama or OpenAlex from the test suite.
     monkeypatch.setattr(main, "add_chunks", lambda *a, **k: None)
@@ -32,7 +38,36 @@ class TestUploadValidation:
     def test_rejects_empty_pdf_without_a_500(self, client):
         response = client.post("/upload", files={"file": ("a.pdf", b"", "application/pdf")})
         assert response.status_code == 400
+        assert "empty" in response.json()["detail"].lower()
+
+    def test_rejects_unreadable_pdf_without_a_500(self, client):
+        response = client.post(
+            "/upload", files={"file": ("a.pdf", b"not really a pdf", "application/pdf")}
+        )
+        assert response.status_code == 400
         assert "could not read" in response.json()["detail"].lower()
+
+    @pytest.mark.parametrize("name,expected", [
+        ("../../evil.pdf", "evil.pdf"),
+        ("a/../../../etc/passwd.pdf", "passwd.pdf"),
+        ("C:/Windows/evil.pdf", "evil.pdf"),
+        ("", "upload.pdf"),
+    ])
+    def test_filenames_cannot_escape_the_upload_directory(self, name, expected):
+        from backend.main import UPLOAD_DIR, safe_filename
+
+        cleaned = safe_filename(name)
+        assert cleaned == expected
+        assert (UPLOAD_DIR / f"id_{cleaned}").resolve().parent == UPLOAD_DIR.resolve()
+
+    def test_rejects_oversized_upload(self, client, monkeypatch):
+        import backend.main as main
+
+        monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 1024)
+        response = client.post(
+            "/upload", files={"file": ("big.pdf", b"x" * 5000, "application/pdf")}
+        )
+        assert response.status_code == 413
 
     def test_rejects_pdf_with_no_extractable_text(self, client, tmp_path):
         import fitz

@@ -1,17 +1,31 @@
 import sqlite3
 import json
+from contextlib import contextmanager
 from pathlib import Path
-from datetime import datetime
 from typing import Optional
 
 DB_PATH = Path(__file__).parent.parent.parent / "data" / "results.db"
 
 
+@contextmanager
 def get_conn():
+    """Commit-and-close connection scope.
+
+    `with sqlite3.connect(...)` commits but never closes, so connections used to
+    linger until garbage collection. WAL plus a busy timeout lets the background
+    analysis write while the API reads instead of raising "database is locked".
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db():

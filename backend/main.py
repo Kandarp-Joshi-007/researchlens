@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.core.pdf_extractor import extract_text, chunk_text
 from backend.core.database import (
@@ -67,6 +67,20 @@ STALE_RUN_SECONDS = int(os.getenv("RESEARCHLENS_STALE_RUN_SECONDS", "900"))
 DEEP_SAMPLES = int(os.getenv("RESEARCHLENS_DEEP_SAMPLES", "3"))
 
 
+MAX_UPLOAD_BYTES = int(os.getenv("RESEARCHLENS_MAX_UPLOAD_MB", "50")) * 1024 * 1024
+
+
+def safe_filename(name: str) -> str:
+    """Reduce an uploaded filename to a harmless basename.
+
+    A client controls this string entirely. Left alone, 'a/../../x.pdf' escapes
+    the uploads directory and an absolute path raises OSError on Windows.
+    """
+    name = (name or "").replace("\\", "/").split("/")[-1]
+    name = re.sub(r"[^\w.\- ]", "_", name).strip(". ")
+    return name[:120] or "upload.pdf"
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -80,18 +94,38 @@ async def upload_paper(background_tasks: BackgroundTasks, file: UploadFile = Fil
     deep=true scores each dimension three times and reports the spread, at
     roughly three times the runtime.
     """
-    if not file.filename.lower().endswith(".pdf"):
+    original_name = safe_filename(file.filename)
+    if not original_name.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files accepted")
 
-    dest = UPLOAD_DIR / f"{uuid.uuid4()}_{file.filename}"
+    dest = UPLOAD_DIR / f"{uuid.uuid4()}_{original_name}"
     digest = hashlib.sha256()
-    with dest.open("wb") as f:
-        while True:
-            block = await file.read(1 << 20)
-            if not block:
-                break
-            digest.update(block)
-            f.write(block)
+    size = 0
+    try:
+        with dest.open("wb") as f:
+            while True:
+                block = await file.read(1 << 20)
+                if not block:
+                    break
+                size += len(block)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        413,
+                        f"File exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit",
+                    )
+                digest.update(block)
+                f.write(block)
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, f"Could not store upload: {exc}")
+
+    if size == 0:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, "Uploaded file is empty")
+
     sha256 = digest.hexdigest()
 
     # Identical content already scored: skip a multi-minute re-analysis.
@@ -117,7 +151,7 @@ async def upload_paper(background_tasks: BackgroundTasks, file: UploadFile = Fil
         dest.unlink(missing_ok=True)
         raise HTTPException(422, "No extractable text found — is this a scanned PDF?")
 
-    paper_id = save_paper(file.filename, paper_data["title"], paper_data["author"],
+    paper_id = save_paper(original_name, paper_data["title"], paper_data["author"],
                           paper_data["page_count"], filepath=str(dest), sha256=sha256)
 
     run_id = create_run(paper_id)
@@ -132,7 +166,15 @@ def _process_paper(paper_id: int, paper_data: dict, run_id: int, samples: int = 
     try:
         update_run(run_id, "embedding")
         chunks = chunk_text(paper_data["full_text"])
-        add_chunks(paper_id, chunks, {"title": paper_data["title"], "filename": paper_data.get("title", "")})
+        try:
+            add_chunks(paper_id, chunks,
+                       {"title": paper_data["title"],
+                        "filename": paper_data.get("title", "")})
+        except Exception as exc:
+            # Without embeddings the agents fall back to whole sections, which
+            # is worse but still a usable analysis. Q&A stays unavailable.
+            log.warning("Embedding failed for paper %s (%s); scoring from sections",
+                        paper_id, exc)
 
         update_run(run_id, "prior_art")
         works = find_similar_works(
@@ -148,6 +190,13 @@ def _process_paper(paper_id: int, paper_data: dict, run_id: int, samples: int = 
         # OLLAMA_NUM_PARALLEL and revisit this on a larger GPU.
         scores = {}
         for spec in AGENTS:
+            # The user can delete a paper while its analysis is still running.
+            # Stop quietly rather than writing rows for a paper that is gone.
+            if not get_paper(paper_id):
+                log.info("Paper %s deleted mid-analysis; abandoning run %s",
+                         paper_id, run_id)
+                return
+
             update_run(run_id, f"scoring:{spec['name']}")
             result = runner.run(spec, paper_data, paper_id=paper_id,
                                 prior_art=works, samples=samples)
@@ -157,6 +206,10 @@ def _process_paper(paper_id: int, paper_data: dict, run_id: int, samples: int = 
                        score_min=result["score_min"], score_max=result["score_max"],
                        samples=result["samples"])
             scores[spec["name"]] = result["score"]
+
+        if not get_paper(paper_id):
+            log.info("Paper %s deleted mid-analysis; discarding results", paper_id)
+            return
 
         overall = overall_score(scores)
         save_summary(paper_id, overall, verdict_for(overall))
@@ -298,18 +351,43 @@ Question: {question}
 
 
 class QuestionRequest(BaseModel):
-    question: str
+    question: str = Field(min_length=1, max_length=2000)
 
 
 @app.post("/query/{paper_id}")
 def query_paper(paper_id: int, req: QuestionRequest):
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(422, "Question is empty")
+
     summary = get_paper_summary(paper_id)
     if not summary:
         raise HTTPException(404, "Paper not found or not yet processed")
-    chunks = similarity_search(req.question, k=5, paper_id=paper_id)
+
+    # Retrieval needs the embedding model, so Ollama being down surfaces here
+    # first. Report it as a dependency failure rather than a bare 500.
+    try:
+        chunks = similarity_search(question, k=5, paper_id=paper_id)
+    except Exception as exc:
+        log.warning("Retrieval failed for paper %s: %s", paper_id, exc)
+        raise HTTPException(503, f"Search backend unavailable: {_short(exc)}")
+
     if not chunks:
         raise HTTPException(422, "No embeddings found for this paper")
+
     context = "\n\n---\n\n".join(chunks)
     chain = _QA_PROMPT | get_llm(temperature=0.1) | StrOutputParser()
-    answer = chain.invoke({"context": context, "question": req.question})
+    try:
+        answer = chain.invoke({"context": context, "question": question})
+    except Exception as exc:
+        log.warning("Q&A generation failed for paper %s: %s", paper_id, exc)
+        raise HTTPException(
+            503,
+            f"Could not reach the language model — is `ollama serve` running? "
+            f"({_short(exc)})",
+        )
     return {"answer": answer, "source_chunks": len(chunks)}
+
+
+def _short(exc: Exception, limit: int = 160) -> str:
+    return str(exc).replace("\n", " ")[:limit]
