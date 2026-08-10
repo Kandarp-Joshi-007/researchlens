@@ -37,7 +37,7 @@ def build_context(paper_data: dict, spec: dict, paper_id: int = None,
             used = 0
             abstract = (paper_data.get("sections") or {}).get("abstract", "").strip()
             if abstract:
-                snippet = abstract[:3000]
+                snippet = abstract[:min(3000, budget)]
                 parts.append(f"[ABSTRACT]\n{snippet}")
                 used += len(snippet)
 

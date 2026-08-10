@@ -114,6 +114,26 @@ class TestContextBuilding:
                                        budget=5_000)
         assert len(context) <= 5_200
 
+    def test_retrieval_path_respects_budget(self, monkeypatch):
+        monkeypatch.setattr(runner, "retrieve_for_queries",
+                            lambda queries, paper_id, **kw: ["c" * 20_000] * 5)
+        paper = {"title": "T", "full_text": "x" * 1000,
+                 "sections": {"abstract": "a" * 50_000}}
+        context = runner.build_context(paper, {"name": "x", "queries": ["q"]},
+                                       paper_id=1, budget=4_000)
+        assert len(context) <= 4_400, "abstract must not overshoot the budget"
+
+    def test_falls_back_when_retrieval_raises(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise RuntimeError("chroma down")
+
+        monkeypatch.setattr(runner, "retrieve_for_queries", boom)
+        paper = {"title": "T", "full_text": "body",
+                 "sections": {"abstract": "ABS " * 20}}
+        context = runner.build_context(paper, {"name": "x", "queries": ["q"]},
+                                       paper_id=1)
+        assert "ABS" in context
+
     def test_prompts_render_for_every_agent(self):
         for spec in AGENTS:
             variables = {"title": "T", "context": "C"}
