@@ -44,14 +44,17 @@ Assess novelty, non-obviousness, utility, and enablement.
 Score 1-10 where 10 = highly patentable (novel, non-obvious, clear utility,
 sufficiently enabled). A survey or review paper that contributes no new
 technical method should score low on novelty.
-Judge novelty against the PRIOR ART listed below: if closely related work already
-exists, say so explicitly in your rationale and lower the score accordingly. If no
-prior art was retrieved, judge on the paper alone and note that limitation.""",
+Judge novelty against the PRIOR ART listed below. Your rationale MUST begin with
+one sentence naming the closest listed prior-art work and stating whether the
+paper is meaningfully distinct from it; if closely related work already exists,
+lower the score accordingly. If the prior-art list is empty, begin instead with
+"No prior art was retrieved" and note that the novelty judgement is unverified.""",
             _EXCERPTS + """
 PRIOR ART (similar published work retrieved from OpenAlex):
 {prior_art}
 
-Evaluate this research for patentability, comparing it against the prior art above.""",
+Evaluate this research for patentability. Start your rationale by naming the
+closest work in the PRIOR ART list above and comparing this paper to it.""",
         ),
     },
     {
