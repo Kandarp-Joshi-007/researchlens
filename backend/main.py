@@ -5,6 +5,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import hashlib
 import logging
+import re
 import uuid
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
@@ -21,6 +22,7 @@ from backend.core.database import (
     get_run_history, get_paper,
 )
 from backend.core.prior_art import find_similar_works
+from backend.core.report import build_markdown
 from backend.core.vectorstore import add_chunks, similarity_search, delete_paper_chunks
 from backend.agents.base import get_llm
 from backend.agents.definitions import AGENTS, overall_score, verdict_for
@@ -45,6 +47,9 @@ log = logging.getLogger(__name__)
 # A run with no progress for this long is presumed dead (backend restart).
 STALE_RUN_SECONDS = int(os.getenv("RESEARCHLENS_STALE_RUN_SECONDS", "900"))
 
+# Samples per agent in deep-analysis mode, used to report score spread.
+DEEP_SAMPLES = int(os.getenv("RESEARCHLENS_DEEP_SAMPLES", "3"))
+
 
 @app.on_event("startup")
 def startup():
@@ -57,7 +62,13 @@ def health():
 
 
 @app.post("/upload")
-async def upload_paper(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def upload_paper(background_tasks: BackgroundTasks, file: UploadFile = File(...),
+                       deep: bool = False):
+    """Upload a PDF and start analysis.
+
+    deep=true scores each dimension three times and reports the spread, at
+    roughly three times the runtime.
+    """
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files accepted")
 
@@ -99,13 +110,14 @@ async def upload_paper(background_tasks: BackgroundTasks, file: UploadFile = Fil
                           paper_data["page_count"], filepath=str(dest), sha256=sha256)
 
     run_id = create_run(paper_id)
-    background_tasks.add_task(_process_paper, paper_id, paper_data, run_id)
+    background_tasks.add_task(_process_paper, paper_id, paper_data, run_id,
+                              DEEP_SAMPLES if deep else 1)
 
     return {"paper_id": paper_id, "title": paper_data["title"],
-            "pages": paper_data["page_count"], "run_id": run_id}
+            "pages": paper_data["page_count"], "run_id": run_id, "deep": deep}
 
 
-def _process_paper(paper_id: int, paper_data: dict, run_id: int):
+def _process_paper(paper_id: int, paper_data: dict, run_id: int, samples: int = 1):
     try:
         update_run(run_id, "embedding")
         chunks = chunk_text(paper_data["full_text"])
@@ -121,10 +133,13 @@ def _process_paper(paper_id: int, paper_data: dict, run_id: int):
         scores = {}
         for spec in AGENTS:
             update_run(run_id, f"scoring:{spec['name']}")
-            result = runner.run(spec, paper_data, paper_id=paper_id, prior_art=works)
+            result = runner.run(spec, paper_data, paper_id=paper_id,
+                                prior_art=works, samples=samples)
             save_score(paper_id, spec["name"], result["score"],
                        result["rationale"], result["key_points"],
-                       result["evidence"], run_id=run_id)
+                       result["evidence"], run_id=run_id,
+                       score_min=result["score_min"], score_max=result["score_max"],
+                       samples=result["samples"])
             scores[spec["name"]] = result["score"]
 
         overall = overall_score(scores)
@@ -180,7 +195,7 @@ def _seconds_since(timestamp: str):
 
 
 @app.post("/papers/{paper_id}/reanalyse")
-def reanalyse(background_tasks: BackgroundTasks, paper_id: int):
+def reanalyse(background_tasks: BackgroundTasks, paper_id: int, deep: bool = False):
     """Re-run the analysis, keeping previous runs for comparison."""
     paper = get_paper(paper_id)
     if not paper:
@@ -190,8 +205,31 @@ def reanalyse(background_tasks: BackgroundTasks, paper_id: int):
 
     paper_data = extract_text(paper["filepath"])
     run_id = create_run(paper_id)
-    background_tasks.add_task(_process_paper, paper_id, paper_data, run_id)
-    return {"paper_id": paper_id, "run_id": run_id, "stage": "queued"}
+    background_tasks.add_task(_process_paper, paper_id, paper_data, run_id,
+                              DEEP_SAMPLES if deep else 1)
+    return {"paper_id": paper_id, "run_id": run_id, "stage": "queued", "deep": deep}
+
+
+@app.get("/papers/{paper_id}/report")
+def paper_report(paper_id: int):
+    """Commercialisation brief as Markdown."""
+    paper = get_paper(paper_id)
+    if not paper:
+        raise HTTPException(404, "Paper not found")
+    scores = get_paper_scores(paper_id)
+    if not scores:
+        raise HTTPException(409, "Paper has not been scored yet")
+
+    markdown = build_markdown(paper, scores, get_paper_summary(paper_id),
+                              get_prior_art(paper_id))
+    return {"paper_id": paper_id, "filename": _report_filename(paper),
+            "markdown": markdown}
+
+
+def _report_filename(paper: dict) -> str:
+    stem = re.sub(r"[^\w\s-]", "", paper.get("title") or "report").strip()
+    stem = re.sub(r"\s+", "-", stem)[:60] or "report"
+    return f"{stem}-commercialisation-brief.md"
 
 
 @app.get("/papers/{paper_id}/history")

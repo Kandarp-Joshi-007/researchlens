@@ -63,6 +63,9 @@ def init_db():
         _add_column(conn, "papers", "sha256", "TEXT")
         _add_column(conn, "scores", "evidence", "TEXT")
         _add_column(conn, "scores", "run_id", "INTEGER")
+        _add_column(conn, "scores", "score_min", "REAL")
+        _add_column(conn, "scores", "score_max", "REAL")
+        _add_column(conn, "scores", "samples", "INTEGER")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_papers_sha ON papers(sha256)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scores_paper ON scores(paper_id, run_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_paper ON runs(paper_id)")
@@ -170,13 +173,18 @@ def get_run_history(paper_id: int) -> list:
 
 
 def save_score(paper_id: int, agent: str, score: float, rationale: str,
-               key_points: list, evidence: list = None, run_id: int = None):
+               key_points: list, evidence: list = None, run_id: int = None,
+               score_min: float = None, score_max: float = None,
+               samples: int = 1):
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO scores (paper_id, agent, score, rationale, key_points,"
-            " evidence, run_id) VALUES (?,?,?,?,?,?,?)",
+            " evidence, run_id, score_min, score_max, samples)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (paper_id, agent, score, rationale, json.dumps(key_points),
-             json.dumps(evidence or []), run_id),
+             json.dumps(evidence or []), run_id,
+             score_min if score_min is not None else score,
+             score_max if score_max is not None else score, samples),
         )
 
 
@@ -232,13 +240,15 @@ def get_paper_scores(paper_id: int) -> list[dict]:
         ).fetchone()["r"]
         if latest is None:
             rows = conn.execute(
-                "SELECT agent, score, rationale, key_points, evidence, scored_at"
+                "SELECT agent, score, rationale, key_points, evidence, scored_at,"
+                " score_min, score_max, samples"
                 " FROM scores WHERE paper_id=? ORDER BY agent",
                 (paper_id,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT agent, score, rationale, key_points, evidence, scored_at"
+                "SELECT agent, score, rationale, key_points, evidence, scored_at,"
+                " score_min, score_max, samples"
                 " FROM scores WHERE paper_id=? AND run_id=? ORDER BY agent",
                 (paper_id, latest),
             ).fetchall()

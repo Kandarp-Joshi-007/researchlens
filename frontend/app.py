@@ -106,6 +106,16 @@ def show_results(paper_id: int):
     scores = {s["agent"]: s for s in data["scores"]}
     overall = data.get("overall", 0.0)
 
+    report = requests.get(f"{API_BASE}/papers/{paper_id}/report")
+    if report.ok:
+        payload = report.json()
+        st.download_button(
+            "Download commercialisation brief",
+            data=payload["markdown"],
+            file_name=payload["filename"],
+            mime="text/markdown",
+        )
+
     col_score, col_detail = st.columns([1, 2])
 
     with col_score:
@@ -137,6 +147,18 @@ def show_results(paper_id: int):
                 with tab:
                     display_score = (10 - s["score"]) if key == "risk" else s["score"]
                     st.metric("Score", f"{display_score:.1f} / 10")
+
+                    if (s.get("samples") or 1) > 1:
+                        low, high = s.get("score_min"), s.get("score_max")
+                        if key == "risk":
+                            low, high = 10 - high, 10 - low
+                        spread = (high or 0) - (low or 0)
+                        agreement = ("high" if spread <= 1 else
+                                     "moderate" if spread <= 3 else "low")
+                        st.caption(
+                            f"{s['samples']} samples · range {low:.1f}–{high:.1f} "
+                            f"· {agreement} agreement"
+                        )
                     st.markdown("**Rationale**")
                     st.write(s["rationale"])
                     if s.get("key_points"):

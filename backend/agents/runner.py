@@ -1,6 +1,7 @@
 """Runs an agent spec against a paper and returns a validated verdict."""
 
 import logging
+from statistics import median
 
 from ..core.prior_art import format_for_prompt
 from ..core.vectorstore import retrieve_for_queries
@@ -74,8 +75,14 @@ def _sections_context(paper_data: dict, budget: int) -> str:
 
 
 def run(spec: dict, paper_data: dict, paper_id: int = None,
-        context: str = None, prior_art: list = None) -> dict:
-    """Score one paper with one agent."""
+        context: str = None, prior_art: list = None, samples: int = 1) -> dict:
+    """Score one paper with one agent.
+
+    With samples > 1 the agent is asked repeatedly at a non-zero temperature and
+    the median is reported alongside the spread. Temperature 0 makes a score
+    repeatable but not necessarily reliable; sampling shows how stable the
+    judgement actually is. Costs one full inference per sample.
+    """
     if context is None:
         context = build_context(paper_data, spec, paper_id=paper_id)
 
@@ -83,12 +90,35 @@ def run(spec: dict, paper_data: dict, paper_id: int = None,
     if spec.get("uses_prior_art"):
         variables["prior_art"] = format_for_prompt(prior_art or [])
 
-    verdict: AgentVerdict = score_with_agent(spec["prompt"], variables)
-    log.info("%s scored %.1f (%d chars of context)",
-             spec["name"], verdict.score, len(context))
+    samples = max(1, samples)
+    verdicts = []
+    for index in range(samples):
+        # Deterministic for a single pass; varied when sampling for spread.
+        temperature = 0.0 if samples == 1 else 0.7
+        try:
+            verdicts.append(score_with_agent(spec["prompt"], variables,
+                                             temperature=temperature))
+        except Exception:
+            # Tolerate a failed sample as long as one attempt succeeded.
+            if index == samples - 1 and not verdicts:
+                raise
+            log.warning("%s sample %d failed; continuing", spec["name"], index + 1)
+
+    scores = [v.score for v in verdicts]
+    median_score = median(scores)
+    # Report the sample nearest the median so prose matches the headline number.
+    chosen = min(verdicts, key=lambda v: abs(v.score - median_score))
+
+    log.info("%s scored %.1f (range %.1f-%.1f over %d sample(s), %d chars context)",
+             spec["name"], median_score, min(scores), max(scores),
+             len(scores), len(context))
+
     return {
-        "score": verdict.score,
-        "rationale": verdict.rationale,
-        "key_points": verdict.key_points[:5],
-        "evidence": verdict.evidence[:5],
+        "score": round(median_score, 1),
+        "rationale": chosen.rationale,
+        "key_points": chosen.key_points[:5],
+        "evidence": chosen.evidence[:5],
+        "score_min": min(scores),
+        "score_max": max(scores),
+        "samples": len(scores),
     }
