@@ -73,14 +73,19 @@ STEP 3: Embedding (for Q&A)
   paper's ID.
 
 STEP 4: Scoring — Four AI Agents
-  Four separate AI agents each read relevant sections of the
-  paper and return a score out of 10 with a rationale and
-  bullet-point key findings. Each agent has a specific expert
-  persona baked into its system prompt:
+  Four separate AI agents each read the passages of the paper
+  most relevant to their own question (pulled by similarity
+  search rather than a fixed slice) and return a score out of
+  10 with a rationale, bullet-point key findings, and verbatim
+  quotes from the paper as evidence. Output is schema-validated,
+  so a malformed reply is retried rather than silently scored 5.
+  Each agent has a specific expert persona in its system prompt:
 
   Agent 1 — PATENTABILITY (weight: 30%)
     Persona: Patent attorney
     Evaluates: novelty, non-obviousness, utility, enablement
+    Grounding: judged against real prior art retrieved from
+               OpenAlex, not from the paper alone
     Question: "Could this be patented?"
 
   Agent 2 — LICENSING (weight: 30%)
@@ -135,12 +140,31 @@ STEP 6: Ask the Paper (RAG Q&A)
 
 
 ----------------------------------------------------------------
-WHY SCORES ARE CONSISTENT (after the fix)
+CONSISTENCY VS CONFIDENCE
 ----------------------------------------------------------------
-The LLM temperature is set to 0.0. Temperature controls how
-random the model is when picking its next word. At 0.0 it always
-picks the most likely word, making outputs fully deterministic —
-the same paper always produces the same score.
+The LLM temperature is 0.0 by default, so the same paper always
+produces the same score. Note that this buys repeatability, not
+accuracy — a consistent score can still be a wrong one.
+
+Deep analysis mode (a checkbox in the sidebar) scores each
+dimension three times at a higher temperature and reports the
+median with its range. A tight range means the agents agree; a
+wide one means the score should not be leaned on. It costs about
+three times the runtime.
+
+
+----------------------------------------------------------------
+STEP 7: Reports and portfolio
+----------------------------------------------------------------
+Any scored paper can be exported as a one-page commercialisation
+brief (Markdown) containing the scores, weights, confidence,
+rationales, evidence quotes and prior art.
+
+The portfolio view summarises every paper analysed: headline
+counts, a comparison of any two papers dimension by dimension,
+a table view, and CSV export. Multiple PDFs can be uploaded at
+once, and re-uploading a file already analysed returns the saved
+result instead of repeating the run.
 
 
 ----------------------------------------------------------------
@@ -151,17 +175,18 @@ FILE STRUCTURE
   |
   |-- backend/
   |   |-- main.py              API routes (upload, status,
-  |   |                        results, query)
+  |   |                        results, report, query)
   |   |-- agents/
-  |   |   |-- base.py          LLM setup + score parser
-  |   |   |-- patentability.py Patent scoring agent
-  |   |   |-- licensing.py     Licensing scoring agent
-  |   |   |-- spinout.py       Spinout scoring agent
-  |   |   |-- risk.py          Risk scoring agent
+  |   |   |-- base.py          LLM setup + verdict schema
+  |   |   |-- definitions.py   The four agent specs, weights,
+  |   |   |                    prompts and scoring formula
+  |   |   |-- runner.py        Builds context and runs an agent
   |   |-- core/
   |       |-- pdf_extractor.py PDF text + section extraction
   |       |-- vectorstore.py   ChromaDB read/write
   |       |-- database.py      SQLite read/write
+  |       |-- prior_art.py     OpenAlex prior-art lookup
+  |       |-- report.py        Commercialisation brief
   |
   |-- frontend/
   |   |-- app.py               Streamlit UI
@@ -171,7 +196,9 @@ FILE STRUCTURE
   |   |-- results.db           Paper scores (SQLite)
   |
   |-- uploads/                 Uploaded PDF files
+  |-- tests/                   pytest suite (run: python -m pytest)
   |-- requirements.txt         Python dependencies
+  |-- .env.example             Configurable settings
   |-- run.sh                   Starts backend + frontend together
 
 

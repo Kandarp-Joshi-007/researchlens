@@ -1,6 +1,3 @@
-import time
-from pathlib import Path
-
 import pandas as pd
 import requests
 import streamlit as st
@@ -64,7 +61,9 @@ with st.sidebar:
 
 # ── Main: status polling then results ────────────────────────────────────────
 STAGE_LABELS = {
+    "queued": "Queued…",
     "embedding": "Embedding text…",
+    "prior_art": "Searching for prior art…",
     "scoring:patentability": "Running patentability agent…",
     "scoring:licensing": "Running licensing agent…",
     "scoring:spinout": "Running spin-out agent…",
@@ -275,34 +274,69 @@ def show_results(paper_id: int):
 
 
 # ── Active paper: poll until done ────────────────────────────────────────────
+@st.fragment(run_every="3s")
+def render_progress(paper_id):
+    """Auto-refreshing progress panel.
+
+    Scoped as a fragment so only this block re-runs while an analysis is in
+    flight, instead of re-executing the whole script (and every API call in it)
+    every three seconds.
+    """
+    try:
+        status_resp = requests.get(f"{API_BASE}/status/{paper_id}", timeout=10)
+    except requests.RequestException as exc:
+        st.warning(f"Lost contact with the API: {exc}")
+        return
+
+    if not status_resp.ok:
+        st.warning("Could not read analysis status.")
+        return
+
+    status = status_resp.json()
+    stage = status.get("stage", "unknown")
+
+    if status.get("done"):
+        st.success("Analysis complete.")
+        if st.button("Show results", key=f"show_{paper_id}", type="primary"):
+            st.rerun()
+        return
+
+    if stage == "error":
+        st.error(f"Processing failed: {status.get('error')}")
+        return
+
+    label = STAGE_LABELS.get(stage, stage)
+    with st.status(label, expanded=True):
+        for step_stage, step_label in STAGE_LABELS.items():
+            if step_stage == "done":
+                break
+            st.write(step_label)
+            if step_stage == stage:
+                break
+
+
 if "active_paper_id" in st.session_state:
     paper_id = st.session_state["active_paper_id"]
     title = st.session_state.get("active_title", f"Paper #{paper_id}")
 
     st.subheader(f"📄 {title}")
 
-    status_resp = requests.get(f"{API_BASE}/status/{paper_id}")
-    if status_resp.ok:
-        status = status_resp.json()
-        stage = status.get("stage", "unknown")
+    try:
+        status_resp = requests.get(f"{API_BASE}/status/{paper_id}", timeout=10)
+        status = status_resp.json() if status_resp.ok else {}
+    except requests.RequestException:
+        status = {}
 
-        if not status.get("done") and stage != "error":
-            label = STAGE_LABELS.get(stage, stage)
-            with st.status(label, expanded=True) as s_widget:
-                for step_stage, step_label in STAGE_LABELS.items():
-                    if step_stage == "done":
-                        break
-                    st.write(step_label)
-                    if step_stage == stage:
-                        break
-            time.sleep(3)
+    stage = status.get("stage", "unknown")
+    if status.get("done"):
+        show_results(paper_id)
+    elif stage == "error":
+        st.error(f"Processing failed: {status.get('error')}")
+        if st.button("Re-analyse", key=f"retry_{paper_id}"):
+            requests.post(f"{API_BASE}/papers/{paper_id}/reanalyse")
             st.rerun()
-
-        elif stage == "error":
-            st.error(f"Processing failed: {status.get('error')}")
-
-        else:
-            show_results(paper_id)
+    else:
+        render_progress(paper_id)
 
 # ── Portfolio ─────────────────────────────────────────────────────────────────
 def render_portfolio(rows):

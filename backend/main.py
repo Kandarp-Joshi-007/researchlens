@@ -1,5 +1,6 @@
 import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -10,9 +11,7 @@ import uuid
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Dict
 
 from backend.core.pdf_extractor import extract_text, chunk_text
 from backend.core.database import (
@@ -33,12 +32,29 @@ from langchain.schema.output_parser import StrOutputParser
 UPLOAD_DIR = Path(__file__).parent.parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="ResearchLens API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="ResearchLens API", version="1.1.0", lifespan=lifespan)
+
+# Local-first by default: the Streamlit UI is the only intended caller.
+# Override with a comma-separated RESEARCHLENS_ALLOWED_ORIGINS if you host this.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "RESEARCHLENS_ALLOWED_ORIGINS",
+        "http://localhost:8501,http://127.0.0.1:8501",
+    ).split(",")
+    if origin.strip()
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -49,11 +65,6 @@ STALE_RUN_SECONDS = int(os.getenv("RESEARCHLENS_STALE_RUN_SECONDS", "900"))
 
 # Samples per agent in deep-analysis mode, used to report score spread.
 DEEP_SAMPLES = int(os.getenv("RESEARCHLENS_DEEP_SAMPLES", "3"))
-
-
-@app.on_event("startup")
-def startup():
-    init_db()
 
 
 @app.get("/health")
@@ -130,6 +141,11 @@ def _process_paper(paper_id: int, paper_data: dict, run_id: int, samples: int = 
         )
         save_prior_art(paper_id, works)
 
+        # Agents run sequentially on purpose. Running them concurrently only
+        # helps when the whole model fits in VRAM with room for several KV
+        # caches; on a 4 GB card qwen2.5:7b is already ~46% offloaded to CPU,
+        # so parallel slots would multiply the cache and thrash. Raise
+        # OLLAMA_NUM_PARALLEL and revisit this on a larger GPU.
         scores = {}
         for spec in AGENTS:
             update_run(run_id, f"scoring:{spec['name']}")

@@ -25,3 +25,7 @@ requests==2.32.3
 # Data
 pydantic==2.11.3
 python-dotenv==1.1.0
+pandas>=2.0
+
+# Tests
+pytest>=8.0
