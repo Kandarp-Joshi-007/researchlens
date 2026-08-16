@@ -24,5 +24,7 @@ data/*.db
 Thumbs.db
 desktop.ini
 
-# Claude runtime
-.claude/scheduled_tasks.lock
+# Local tooling and working notes — machine-specific, not part of the project
+.claude/
+CLAUDE.md
+PITCH_BRIEFING.html

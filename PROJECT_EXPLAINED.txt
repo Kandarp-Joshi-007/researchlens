@@ -58,11 +58,14 @@ STEP 1: Upload
   is extracted from the PDF and stored in SQLite.
 
 STEP 2: Text Extraction
-  PyMuPDF reads every page of the PDF block by block. It
-  automatically detects section headings (Abstract, Methods,
-  Results, Conclusion, etc.) by checking if a short line
-  matches known keywords. The full text and each section are
-  stored separately so agents can read the most relevant part.
+  PyMuPDF reads every page of the PDF block by block. Section
+  headings cannot be found by font size — in academic papers
+  they are the same size as body text and differ only by weight
+  — so detection uses the bold flag combined with a numbering
+  pattern. Publisher boilerplate is stripped at block level and
+  two-column layouts are restored to reading order. The full
+  text and each section are stored separately so agents can
+  read the most relevant part.
 
 STEP 3: Embedding (for Q&A)
   The full text is split into overlapping chunks of ~800 words
@@ -187,9 +190,11 @@ FILE STRUCTURE
   |       |-- database.py      SQLite read/write
   |       |-- prior_art.py     OpenAlex prior-art lookup
   |       |-- report.py        Commercialisation brief
+  |       |-- maintenance.py   Orphan-upload cleanup
   |
   |-- frontend/
   |   |-- app.py               Streamlit UI
+  |   |-- render.py            HTML escaping helpers
   |
   |-- data/
   |   |-- chroma/              Vector embeddings (ChromaDB)
