@@ -2,8 +2,6 @@
 
 import sqlite3
 
-import pytest
-
 
 class TestRoundTrips:
     def test_paper_and_score(self, temp_db):

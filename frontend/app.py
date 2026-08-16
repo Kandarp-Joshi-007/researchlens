@@ -1,8 +1,27 @@
+import os
+import sys
+from pathlib import Path
+
 import pandas as pd
 import requests
 import streamlit as st
 
-API_BASE = "http://localhost:8000"
+sys.path.insert(0, str(Path(__file__).parent))
+from render import esc, safe_url  # noqa: E402
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # optional dependency; environment variables still work
+    pass
+else:
+    load_dotenv(Path(__file__).parent.parent / ".env")
+
+# run.sh lets the backend move off :8000; without this the UI would keep
+# calling the default port and report the backend as down.
+API_BASE = os.getenv(
+    "RESEARCHLENS_API_BASE",
+    "http://localhost:{}".format(os.getenv("BACKEND_PORT", "8000")),
+).rstrip("/")
 API_TIMEOUT = 30
 
 
@@ -157,7 +176,7 @@ def verdict_badge(verdict: str, overall: float):
     bg, fg, _ = VERDICT_STYLES[verdict_band(overall) or "limited"]
     st.markdown(
         f"<div style='background:{bg};color:{fg};padding:12px 18px;border-radius:8px;"
-        f"font-weight:700;font-size:1.05em'>{verdict}</div>",
+        f"font-weight:700;font-size:1.05em'>{esc(verdict)}</div>",
         unsafe_allow_html=True,
     )
 
@@ -239,7 +258,7 @@ def show_results(paper_id: int):
                                 st.markdown(
                                     f"<div style='border-left:3px solid {AGENT_COLORS[key]};"
                                     f"padding:6px 0 6px 12px;margin-bottom:10px;color:inherit;"
-                                    f"font-style:italic;opacity:.85'>“{quote}”</div>",
+                                    f"font-style:italic;opacity:.85'>“{esc(quote)}”</div>",
                                     unsafe_allow_html=True,
                                 )
                     else:
@@ -253,14 +272,17 @@ def show_results(paper_id: int):
         st.caption("Similar published work from OpenAlex, used to ground the "
                    "patentability assessment.")
         for work in works:
-            year = work.get("year") or "n.d."
-            venue = work.get("venue") or "—"
-            doi = work.get("doi")
-            title = f"[{work['title']}]({doi})" if doi else work["title"]
+            year = esc(work.get("year") or "n.d.")
+            venue = esc(work.get("venue") or "—")
+            title = esc(work.get("title") or "Untitled")
+            link = safe_url(work.get("doi"))
+            if link:
+                title = f"<a href='{esc(link)}' target='_blank' rel='noopener'>{title}</a>"
             st.markdown(
                 f"- {title}  \n"
-                f"  <span style='color:#888;font-size:.85em'>{work.get('authors') or 'Unknown'} · "
-                f"{year} · {venue} · cited {work.get('citations', 0)}×</span>",
+                f"  <span style='color:#888;font-size:.85em'>"
+                f"{esc(work.get('authors') or 'Unknown')} · "
+                f"{year} · {venue} · cited {esc(work.get('citations', 0))}×</span>",
                 unsafe_allow_html=True,
             )
 
@@ -389,11 +411,12 @@ def render_portfolio(rows):
         st.caption("Score distribution")
         buckets = {}
         for value in values:
+            # Ten buckets spanning 0–10; a perfect 10 belongs in the last one.
             key = min(int(value), 9)
             buckets[key] = buckets.get(key, 0) + 1
         table = pd.DataFrame(
-            {"papers": [buckets.get(b, 0) for b in range(11)]},
-            index=[f"{b}–{b + 1}" for b in range(11)],
+            {"papers": [buckets.get(b, 0) for b in range(10)]},
+            index=[f"{b}–{b + 1}" for b in range(10)],
         )
         st.bar_chart(table, height=200, color="#2a78d6")
 
@@ -531,8 +554,8 @@ if rows is not None:
             with row_left:
                 st.markdown(
                     f"<div style='padding:6px 0'>"
-                    f"<span style='font-weight:600;font-size:1em'>{title}</span>"
-                    f"<span style='color:#888;font-size:.85em;margin-left:10px'>{date}</span>"
+                    f"<span style='font-weight:600;font-size:1em'>{esc(title)}</span>"
+                    f"<span style='color:#888;font-size:.85em;margin-left:10px'>{esc(date)}</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )

@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import hashlib
 import logging
 import re
+import sqlite3
+import threading
 import uuid
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
@@ -23,7 +25,7 @@ from backend.core.database import (
 from backend.core.prior_art import find_similar_works
 from backend.core.report import build_markdown
 from backend.core.vectorstore import add_chunks, similarity_search, delete_paper_chunks
-from backend.agents.base import get_llm
+from backend.agents.base import LLM_MODEL, NUM_CTX, get_llm
 from backend.agents.definitions import AGENTS, overall_score, verdict_for
 from backend.agents import runner
 from langchain.prompts import ChatPromptTemplate
@@ -32,9 +34,34 @@ from langchain.schema.output_parser import StrOutputParser
 UPLOAD_DIR = Path(__file__).parent.parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+def configure_logging():
+    """Make the application's own log lines visible.
+
+    Uvicorn configures only its own loggers and leaves the root at WARNING, so
+    without this every progress line from the analysis pipeline is dropped and
+    an eight-minute run reports nothing.
+    """
+    level = getattr(logging, os.getenv("RESEARCHLENS_LOG_LEVEL", "INFO").upper(),
+                    logging.INFO)
+    root = logging.getLogger("backend")
+    root.setLevel(level)
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-7s %(name)s | %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        root.addHandler(handler)
+    # Third-party libraries are chatty at INFO; keep them at WARNING.
+    for noisy in ("httpx", "httpcore", "chromadb", "urllib3"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging()
     init_db()
+    log.info("ResearchLens API ready (model=%s, ctx=%s)", LLM_MODEL, NUM_CTX)
     yield
 
 
@@ -75,10 +102,19 @@ def safe_filename(name: str) -> str:
 
     A client controls this string entirely. Left alone, 'a/../../x.pdf' escapes
     the uploads directory and an absolute path raises OSError on Windows.
+
+    Truncation keeps the extension: shortening the whole string used to drop the
+    '.pdf' off a long name, which the caller then rejected as "not a PDF".
     """
     name = (name or "").replace("\\", "/").split("/")[-1]
     name = re.sub(r"[^\w.\- ]", "_", name).strip(". ")
-    return name[:120] or "upload.pdf"
+    if not name:
+        return "upload.pdf"
+
+    stem, dot, ext = name.rpartition(".")
+    if not dot or len(ext) > 10:  # no usable extension; truncate whole
+        return name[:120]
+    return (stem[:120 - len(ext) - 1] + "." + ext) if len(name) > 120 else name
 
 
 @app.get("/health")
@@ -145,11 +181,21 @@ async def upload_paper(background_tasks: BackgroundTasks, file: UploadFile = Fil
         paper_data = extract_text(str(dest))
     except Exception as exc:
         dest.unlink(missing_ok=True)
-        raise HTTPException(400, f"Could not read PDF: {exc}")
+        log.info("Rejected upload %s: %s", original_name, exc)
+        # The message reaches the browser, so it must not carry the server-side
+        # storage path that PyMuPDF puts in its errors.
+        raise HTTPException(400, f"Could not read PDF: {_scrub_paths(exc)}")
 
     if paper_data["char_count"] < 200:
         dest.unlink(missing_ok=True)
         raise HTTPException(422, "No extractable text found — is this a scanned PDF?")
+
+    # Reserved before the paper row exists so a refusal leaves nothing behind.
+    try:
+        _reserve_slot()
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
 
     paper_id = save_paper(original_name, paper_data["title"], paper_data["author"],
                           paper_data["page_count"], filepath=str(dest), sha256=sha256)
@@ -162,7 +208,57 @@ async def upload_paper(background_tasks: BackgroundTasks, file: UploadFile = Fil
             "pages": paper_data["page_count"], "run_id": run_id, "deep": deep}
 
 
+# One analysis at a time, process-wide. FastAPI runs each upload's background
+# task in its own threadpool worker, so selecting four PDFs in the sidebar
+# started four analyses at once — measured peak 4 — each loading the same
+# partly-CPU-offloaded model. That multiplies the KV cache and thrashes exactly
+# the way the sequential-agent loop below exists to avoid. Papers queue instead.
+_ANALYSIS_LOCK = threading.Lock()
+
+# A queued analysis blocks the threadpool worker it waits in, and the sync API
+# endpoints draw on that same pool. Admission is capped so a bulk upload cannot
+# starve /status and /results and hang the UI; past the cap the upload is
+# refused with 429 rather than silently queued behind an hour of work.
+MAX_IN_FLIGHT = int(os.getenv("RESEARCHLENS_MAX_IN_FLIGHT", "6"))
+_ADMISSION = threading.Semaphore(MAX_IN_FLIGHT)
+
+
+def _reserve_slot():
+    """Claim a place in the analysis queue, or raise 429 if it is full."""
+    if not _ADMISSION.acquire(blocking=False):
+        raise HTTPException(
+            429,
+            f"{MAX_IN_FLIGHT} analyses are already queued. Each takes several "
+            "minutes; wait for one to finish and try again.",
+        )
+
+
 def _process_paper(paper_id: int, paper_data: dict, run_id: int, samples: int = 1):
+    """Run one analysis, waiting for the single analysis slot to free up.
+
+    Callers must have reserved an admission slot first; it is released here.
+    """
+    try:
+        if not _ANALYSIS_LOCK.acquire(blocking=False):
+            log.info("Analysis of paper %s is queued behind another run", paper_id)
+            # Waiting happens in slices so the run's updated_at keeps moving;
+            # otherwise a paper queued behind two others trips the stale-run
+            # detector before it has even started.
+            while not _ANALYSIS_LOCK.acquire(timeout=30):
+                if not get_paper(paper_id):
+                    log.info("Queued paper %s was deleted; dropping run %s",
+                             paper_id, run_id)
+                    return
+                update_run(run_id, "queued")
+        try:
+            _run_analysis(paper_id, paper_data, run_id, samples)
+        finally:
+            _ANALYSIS_LOCK.release()
+    finally:
+        _ADMISSION.release()
+
+
+def _run_analysis(paper_id: int, paper_data: dict, run_id: int, samples: int = 1):
     try:
         update_run(run_id, "embedding")
         chunks = chunk_text(paper_data["full_text"])
@@ -200,6 +296,16 @@ def _process_paper(paper_id: int, paper_data: dict, run_id: int, samples: int = 
             update_run(run_id, f"scoring:{spec['name']}")
             result = runner.run(spec, paper_data, paper_id=paper_id,
                                 prior_art=works, samples=samples)
+
+            # Re-check after the agent returns, not just before it starts: an
+            # agent takes minutes, and a delete landing inside that window made
+            # the insert below fail on the foreign key and reported a normal
+            # user action as a crashed analysis.
+            if not get_paper(paper_id):
+                log.info("Paper %s deleted while %s was scoring; abandoning run %s",
+                         paper_id, spec["name"], run_id)
+                return
+
             save_score(paper_id, spec["name"], result["score"],
                        result["rationale"], result["key_points"],
                        result["evidence"], run_id=run_id,
@@ -215,6 +321,15 @@ def _process_paper(paper_id: int, paper_data: dict, run_id: int, samples: int = 
         save_summary(paper_id, overall, verdict_for(overall))
         update_run(run_id, "done", done=True)
 
+    except sqlite3.IntegrityError:
+        # The re-checks above leave a microsecond window in which a delete can
+        # still land between the check and the insert. Losing that race is the
+        # user getting what they asked for, not a failure worth reporting.
+        if not get_paper(paper_id):
+            log.info("Paper %s deleted mid-analysis; abandoning run %s",
+                     paper_id, run_id)
+            return
+        raise
     except Exception as exc:
         log.exception("Analysis failed for paper %s", paper_id)
         update_run(run_id, "error", done=False, error=str(exc))
@@ -272,7 +387,13 @@ def reanalyse(background_tasks: BackgroundTasks, paper_id: int, deep: bool = Fal
     if not paper.get("filepath") or not Path(paper["filepath"]).exists():
         raise HTTPException(410, "Original PDF is no longer on disk")
 
-    paper_data = extract_text(paper["filepath"])
+    try:
+        paper_data = extract_text(paper["filepath"])
+    except Exception as exc:
+        # The stored file can rot between runs (truncated, replaced, corrupted).
+        raise HTTPException(422, f"Could not re-read the stored PDF: {_short(exc)}")
+
+    _reserve_slot()
     run_id = create_run(paper_id)
     background_tasks.add_task(_process_paper, paper_id, paper_data, run_id,
                               DEEP_SAMPLES if deep else 1)
@@ -325,6 +446,8 @@ def get_result(paper_id: int):
 
 @app.delete("/papers/{paper_id}")
 def remove_paper(paper_id: int):
+    if not get_paper(paper_id):
+        raise HTTPException(404, "Paper not found")
     filepath = delete_paper(paper_id)
     try:
         delete_paper_chunks(paper_id)
@@ -391,3 +514,19 @@ def query_paper(paper_id: int, req: QuestionRequest):
 
 def _short(exc: Exception, limit: int = 160) -> str:
     return str(exc).replace("\n", " ")[:limit]
+
+
+# Absolute paths, Windows or POSIX, as they appear inside library error strings.
+_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|/)[^\s'\"]*[\\/][^\s'\"]*")
+
+
+def _scrub_paths(exc: Exception, limit: int = 160) -> str:
+    """An error message with server filesystem paths replaced by the basename.
+
+    PyMuPDF reports 'Failed to open file <full path>'. Echoing that to the
+    client publishes the install location and the uploads directory layout.
+    """
+    def basename(match):
+        return match.group(0).replace("\\", "/").rstrip("/").split("/")[-1]
+
+    return _PATH_RE.sub(basename, str(exc)).replace("\n", " ")[:limit]

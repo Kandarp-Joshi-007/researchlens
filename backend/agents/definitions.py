@@ -123,16 +123,27 @@ AGENTS_BY_NAME = {a["name"]: a for a in AGENTS}
 
 
 def overall_score(scores: dict) -> float:
-    """Weighted overall score. Inverted dimensions are flipped before weighting."""
+    """Weighted overall score. Inverted dimensions are flipped before weighting.
+
+    Weights are renormalised over the dimensions actually present. Summing the
+    full weights against a partial score set silently deflates the result — a
+    paper scored 8.0 on patentability alone came out at 2.4, i.e. "Limited
+    Commercialisation Potential" from a strong score.
+    """
     total = 0.0
+    weight_present = 0.0
     for spec in AGENTS:
-        if spec["name"] not in scores:
+        value = scores.get(spec["name"])
+        if value is None:
             continue
-        value = scores[spec["name"]]
         if spec["inverted"]:
             value = 10 - value
         total += value * spec["weight"]
-    return round(total, 2)
+        weight_present += spec["weight"]
+
+    if not weight_present:
+        return 0.0
+    return round(total / weight_present, 2)
 
 
 def verdict_for(overall: float) -> str:

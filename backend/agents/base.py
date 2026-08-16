@@ -75,17 +75,18 @@ def _pick_structured_method() -> str:
     if _structured_method is not None:
         return _structured_method
 
-    _structured_method = "json_mode"
     try:
         version = httpx.get(f"{OLLAMA_HOST}/api/version", timeout=3.0).json().get("version", "0")
         parts = [int(p) for p in version.split(".")[:3] if p.isdigit()]
-        if parts >= [0, 5]:
-            _structured_method = "json_schema"
+        _structured_method = "json_schema" if parts >= [0, 5] else "json_mode"
         log.info("Ollama %s -> structured output via %s", version, _structured_method)
-    except Exception as exc:  # server down or unreachable; JSON mode is the safe default
+        return _structured_method
+    except Exception as exc:
+        # Not cached: the server merely being down at startup would otherwise
+        # pin the process to the less reliable mode for its whole lifetime,
+        # even after Ollama comes back.
         log.warning("Could not read Ollama version (%s); using json_mode", exc)
-
-    return _structured_method
+        return "json_mode"
 
 
 def score_with_agent(prompt, variables: dict, temperature: float = 0.0,

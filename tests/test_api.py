@@ -1,33 +1,14 @@
 """API tests. The LLM and network are stubbed so the suite stays fast and offline."""
 
 import pytest
-from fastapi.testclient import TestClient
 
 from conftest import make_pdf
 
 
 @pytest.fixture
-def client(temp_db, monkeypatch, tmp_path):
-    import backend.main as main
-
-    # Write uploads to a throwaway directory; otherwise the suite litters the
-    # real uploads/ folder with test PDFs.
-    uploads = tmp_path / "uploads"
-    uploads.mkdir()
-    monkeypatch.setattr(main, "UPLOAD_DIR", uploads)
-
-    # Never call Ollama or OpenAlex from the test suite.
-    monkeypatch.setattr(main, "add_chunks", lambda *a, **k: None)
-    monkeypatch.setattr(main, "find_similar_works", lambda *a, **k: [])
-    monkeypatch.setattr(
-        main.runner, "run",
-        lambda spec, paper_data, **kw: {
-            "score": 6.0, "rationale": "stub", "key_points": ["k"],
-            "evidence": ["quote"], "score_min": 6.0, "score_max": 6.0,
-            "samples": 1,
-        },
-    )
-    return TestClient(main.app)
+def client(api_client):
+    """Shared stubbed TestClient; see conftest.api_client."""
+    return api_client
 
 
 class TestUploadValidation:

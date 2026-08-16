@@ -231,7 +231,7 @@ def get_all_results() -> list[dict]:
                    s.overall, s.verdict
             FROM papers p
             LEFT JOIN summaries s ON s.paper_id = p.id
-            ORDER BY p.uploaded_at DESC
+            ORDER BY p.uploaded_at DESC, p.id DESC
         """).fetchall()
         return [dict(r) for r in rows]
 
@@ -246,12 +246,21 @@ def get_paper_summary(paper_id: int) -> Optional[dict]:
 
 def get_paper_scores(paper_id: int) -> list[dict]:
     with get_conn() as conn:
-        # Only the most recent run, so re-analysis replaces rather than
-        # duplicates. Rows predating run tracking have run_id NULL and are
-        # only used when there is no newer run.
+        # The most recent *finished* run, so re-analysis replaces rather than
+        # duplicates. Preferring a finished run matters when a re-analysis dies
+        # part-way: its two-of-four scores would otherwise be served next to the
+        # previous run's summary, showing a full verdict over partial evidence.
+        # Rows predating run tracking have run_id NULL and are used only when
+        # there is no newer run at all.
         latest = conn.execute(
-            "SELECT MAX(run_id) AS r FROM scores WHERE paper_id=?", (paper_id,)
+            "SELECT MAX(s.run_id) AS r FROM scores s"
+            " JOIN runs r ON r.id = s.run_id AND r.done = 1"
+            " WHERE s.paper_id=?", (paper_id,)
         ).fetchone()["r"]
+        if latest is None:
+            latest = conn.execute(
+                "SELECT MAX(run_id) AS r FROM scores WHERE paper_id=?", (paper_id,)
+            ).fetchone()["r"]
         if latest is None:
             rows = conn.execute(
                 "SELECT agent, score, rationale, key_points, evidence, scored_at,"

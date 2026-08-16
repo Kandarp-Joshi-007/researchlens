@@ -37,6 +37,9 @@ python -m uvicorn backend.main:app --host "$HOST" --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
 echo "Starting frontend on http://$HOST:$FRONTEND_PORT ..."
+# The UI calls the API server-side; tell it where the API actually is, or a
+# non-default BACKEND_PORT leaves it talking to :8000 and reporting a dead API.
+export RESEARCHLENS_API_BASE="${RESEARCHLENS_API_BASE:-http://127.0.0.1:$BACKEND_PORT}"
 python -m streamlit run "$ROOT/frontend/app.py" \
   --server.port "$FRONTEND_PORT" \
   --server.address "$HOST" \

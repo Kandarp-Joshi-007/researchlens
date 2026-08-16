@@ -186,8 +186,23 @@ def _looks_like_heading(text: str, is_bold: bool) -> Optional[str]:
 
 
 def extract_text(pdf_path: str) -> dict:
-    """Extract structured text and metadata from a PDF."""
+    """Extract structured text and metadata from a PDF.
+
+    The document is closed on every path. PyMuPDF holds the file open, and on
+    Windows that lock makes the caller's cleanup unlink() fail, stranding the
+    upload on disk whenever extraction raises.
+    """
     doc = fitz.open(pdf_path)
+    try:
+        return _extract(doc, pdf_path)
+    finally:
+        doc.close()
+
+
+def _extract(doc, pdf_path: str) -> dict:
+    if doc.needs_pass:
+        raise ValueError("PDF is password-protected")
+
     page_count = int(doc.page_count)
 
     pages_blocks = [_page_blocks(page) for page in doc]
@@ -288,7 +303,6 @@ def extract_text(pdf_path: str) -> dict:
     title = str(meta.get("title", "") or "").strip() or _title_from_layout(doc) \
         or Path(pdf_path).stem
     author = str(meta.get("author", "") or "").strip()
-    doc.close()
 
     return {
         "full_text": full_text,

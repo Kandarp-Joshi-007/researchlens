@@ -5,7 +5,7 @@ from statistics import median
 
 from ..core.prior_art import format_for_prompt
 from ..core.vectorstore import retrieve_for_queries
-from .base import AgentVerdict, context_budget_chars, score_with_agent
+from .base import context_budget_chars, score_with_agent
 
 log = logging.getLogger(__name__)
 

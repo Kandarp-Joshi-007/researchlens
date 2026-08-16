@@ -4,10 +4,23 @@ Analysis that lives only inside the app does not travel; this is the one-page
 document a technology transfer officer can attach to an email.
 """
 
+import re
 from datetime import datetime
 from typing import List, Optional
 
 from ..agents.definitions import AGENTS, AGENTS_BY_NAME
+
+_TAG = re.compile(r"<[^>]*>")
+
+
+def _plain(value) -> str:
+    """Strip markup from a PDF-metadata field.
+
+    Title and author come straight out of the uploaded file, and the brief is
+    meant to be emailed on. Markdown renderers that pass raw HTML through would
+    otherwise carry an active payload from the PDF into the reader's viewer.
+    """
+    return _TAG.sub("", str(value or "")).replace("|", "\\|").strip()
 
 
 def _display_score(agent: str, score: Optional[float]) -> Optional[float]:
@@ -24,14 +37,15 @@ def build_markdown(paper: dict, scores: List[dict], summary: Optional[dict],
     verdict = (summary or {}).get("verdict") or "Not yet scored"
     by_agent = {s["agent"]: s for s in scores}
 
+    heading = _plain(paper.get("title")) or _plain(paper.get("filename")) or "Untitled"
     lines = [
-        f"# Commercialisation Brief: {paper.get('title') or paper.get('filename')}",
+        f"# Commercialisation Brief: {heading}",
         "",
         f"**Overall score:** {overall if overall is not None else '—'} / 10  ",
-        f"**Verdict:** {verdict}  ",
+        f"**Verdict:** {_plain(verdict)}  ",
     ]
     if paper.get("author"):
-        lines.append(f"**Authors:** {paper['author']}  ")
+        lines.append(f"**Authors:** {_plain(paper['author'])}  ")
     lines += [
         f"**Pages:** {paper.get('page_count', '—')}  ",
         f"**Assessed:** {datetime.now().strftime('%Y-%m-%d %H:%M')}  ",
@@ -48,12 +62,15 @@ def build_markdown(paper: dict, scores: List[dict], summary: Optional[dict],
 
     for spec in AGENTS:
         row = by_agent.get(spec["name"])
-        if not row:
+        shown = _display_score(spec["name"], (row or {}).get("score"))
+        # A row can exist with a NULL score in a database written before scoring
+        # was validated; render it as missing rather than crashing on format.
+        if not row or shown is None:
             lines.append(f"| {spec['label']} | — | {int(spec['weight'] * 100)}% | — |")
             continue
-        shown = _display_score(spec["name"], row.get("score"))
         samples = row.get("samples") or 1
-        if samples > 1 and row.get("score_min") is not None:
+        if (samples > 1 and row.get("score_min") is not None
+                and row.get("score_max") is not None):
             low = _display_score(spec["name"], row["score_max"])
             high = _display_score(spec["name"], row["score_min"])
             low, high = min(low, high), max(low, high)
@@ -69,9 +86,9 @@ def build_markdown(paper: dict, scores: List[dict], summary: Optional[dict],
     lines += ["", "## Assessment by dimension", ""]
     for spec in AGENTS:
         row = by_agent.get(spec["name"])
-        if not row:
+        shown = _display_score(spec["name"], (row or {}).get("score"))
+        if not row or shown is None:
             continue
-        shown = _display_score(spec["name"], row.get("score"))
         lines += [f"### {spec['label']} — {shown:.1f}/10", "",
                   row.get("rationale") or "_No rationale recorded._", ""]
 

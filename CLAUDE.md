@@ -21,7 +21,8 @@ lookups.
 ```bash
 ollama serve                      # must be running first
 bash run.sh                       # backend :8000 + frontend :8501
-python -m pytest                  # 70 tests, ~10s, no GPU needed
+python -m pytest                  # 140 tests, ~90s, no GPU needed
+python -m pyflakes backend frontend tests                         # lint
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000   # backend only
 python -m streamlit run frontend/app.py --server.port 8501        # frontend only
 ```
@@ -44,9 +45,16 @@ backend/
     vectorstore.py        ChromaDB
     prior_art.py          OpenAlex client
     report.py             commercialisation brief
-frontend/app.py           entire UI
+    maintenance.py        orphan-upload cleanup
+frontend/
+  app.py                  entire UI
+  render.py               HTML escaping — importable without running the app
 tests/                    pytest suite
 ```
+
+The frontend is a script, not a package. `render.py` exists so the escaping can
+be tested without executing `app.py`; `tests/test_frontend.py` drives the real
+script through Streamlit's `AppTest` harness with the backend stubbed.
 
 **To change scoring behaviour, edit `agents/definitions.py`.** Weights, prompts,
 retrieval queries, inversion and verdict thresholds all live there. There is
@@ -113,6 +121,28 @@ at roughly 46% CPU / 54% GPU, ~6.4 GB total footprint. Consequences:
    pair was ΔE 4.1 under protanopia — indistinguishable. Current palette in
    `AGENT_COLORS` passes in light and dark. If you change it, re-validate; do not
    eyeball it.
+7. **`BackgroundTasks` is concurrent, and that undoes the sequential design.**
+   FastAPI runs each request's background task in its own threadpool worker, so
+   selecting four PDFs in the sidebar started four analyses at once (measured
+   peak 4) — the exact thrashing the sequential agent loop exists to avoid.
+   `_ANALYSIS_LOCK` serialises them. Admission is capped (`MAX_IN_FLIGHT`, 6)
+   because a queued analysis blocks the threadpool worker it waits in, and the
+   sync endpoints share that pool: without the cap a bulk upload hangs the API.
+8. **The deleted-mid-analysis guard is a TOCTOU race.** Checking `get_paper`
+   before an agent runs is not enough — the agent takes two minutes and the
+   delete lands inside that window, so `save_score` failed on the foreign key
+   and reported a normal user action as a crashed run. There is now a re-check
+   after each agent returns plus an `IntegrityError` fallback. Found by deleting
+   a paper mid-run against the live server, not by reading the code.
+9. **Everything the UI renders with `unsafe_allow_html` is untrusted.** Titles
+   come from PDF metadata, quotes and rationales from the model, prior-art
+   fields from OpenAlex. Route every interpolated value through `frontend/
+   render.py`'s `esc`, and DOIs through `safe_url`. A PDF whose metadata title
+   is `<img src=x onerror=...>` ran script in the library view.
+10. **`.env` is loaded in `backend/__init__.py`, not `main.py`.** Several modules
+   read their config into module-level constants at import time; loading later
+   leaves everything in `.env.example` documented but silently ignored, which is
+   what it did.
 
 ## Design decisions worth keeping
 
