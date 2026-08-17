@@ -358,6 +358,147 @@ class TestAnalysisIsSerialised:
         assert not main._ANALYSIS_LOCK.locked(), "analysis lock leaked"
 
 
+class TestPublicationYear:
+    """Prior art must predate the paper, so the paper's year has to be found."""
+
+    @staticmethod
+    def _pdf(tmp_path, first_line, name="p.pdf"):
+        import fitz
+
+        path = tmp_path / name
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((40, 60), first_line, fontsize=9)
+        page.insert_text((72, 100), "1. Introduction", fontsize=12,
+                         fontname="helvetica-bold")
+        y = 130
+        for i in range(8):
+            page.insert_text((72, y), f"Body line {i} with enough text to pass.",
+                             fontsize=11)
+            y += 16
+        doc.save(str(path))
+        doc.close()
+        return str(path)
+
+    def test_arxiv_stamp_beats_a_later_file_date(self, tmp_path):
+        """The stamp encodes the original submission; the file was written
+        later. One preprint here reports 2026 metadata for a 2016 paper."""
+        from backend.core.pdf_extractor import extract_text
+
+        path = self._pdf(tmp_path, "arXiv:1611.07004v3  [cs.CV]  26 Nov 2018")
+        assert extract_text(path)["year"] == 2016
+
+    def test_published_line_is_used(self, tmp_path):
+        from backend.core.pdf_extractor import extract_text
+
+        path = self._pdf(tmp_path, "Received: 5 August 2024; Published: 4 September 2024")
+        assert extract_text(path)["year"] == 2024
+
+    def test_copyright_year_is_used(self, tmp_path):
+        from backend.core.pdf_extractor import extract_text
+
+        path = self._pdf(tmp_path, "Copyright 2011 by the authors.")
+        assert extract_text(path)["year"] == 2011
+
+    def test_absurd_years_are_rejected(self, tmp_path):
+        from backend.core.pdf_extractor import extract_text
+
+        path = self._pdf(tmp_path, "Published: 12 March 1802")
+        year = extract_text(path)["year"]
+        assert year is None or year >= 1970
+
+    def test_year_is_never_in_the_future(self, tmp_path):
+        from datetime import datetime
+
+        from backend.core.pdf_extractor import extract_text
+
+        path = self._pdf(tmp_path, "Ordinary first line with no date at all.")
+        year = extract_text(path)["year"]
+        assert year is None or year <= datetime.now().year + 1
+
+
+class TestPriorArtDateFilter:
+    @staticmethod
+    def _capture(monkeypatch):
+        from backend.core import prior_art
+
+        seen = {}
+
+        class Response:
+            @staticmethod
+            def raise_for_status():
+                pass
+
+            @staticmethod
+            def json():
+                return {"results": []}
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            seen.update(params or {})
+            return Response()
+
+        monkeypatch.setattr(prior_art.httpx, "get", fake_get)
+        monkeypatch.setattr(prior_art, "ENABLED", True)
+        return prior_art, seen
+
+    def test_year_becomes_an_openalex_filter(self, monkeypatch):
+        prior_art, seen = self._capture(monkeypatch)
+        prior_art.find_similar_works("Some Paper Title", before_year=2016)
+        assert seen.get("filter") == "to_publication_date:2016-12-31"
+
+    def test_no_year_means_no_filter(self, monkeypatch):
+        prior_art, seen = self._capture(monkeypatch)
+        prior_art.find_similar_works("Some Paper Title")
+        assert "filter" not in seen
+
+    def test_results_published_after_the_paper_are_excluded(self, monkeypatch):
+        """The regression itself: a 2016 paper was handed 2019 and 2020 work
+        as prior art, which cannot bear on its novelty."""
+        from backend.core import prior_art
+
+        class Response:
+            @staticmethod
+            def raise_for_status():
+                pass
+
+            @staticmethod
+            def json():
+                # What OpenAlex returns once the date filter is applied.
+                return {"results": [
+                    {"title": "Contemporary Work", "publication_year": 2016,
+                     "cited_by_count": 10},
+                    {"title": "Older Work", "publication_year": 2013,
+                     "cited_by_count": 5},
+                ]}
+
+        monkeypatch.setattr(prior_art.httpx, "get",
+                            lambda *a, **k: Response())
+        monkeypatch.setattr(prior_art, "ENABLED", True)
+        works = prior_art.find_similar_works("Paper", before_year=2016)
+        assert works and all(w["year"] <= 2016 for w in works)
+
+    def test_the_analysis_passes_the_year_through(self, api_client, tmp_path,
+                                                  monkeypatch):
+        import backend.main as main
+
+        captured = {}
+        monkeypatch.setattr(
+            main, "find_similar_works",
+            lambda title, abstract="", before_year=None: captured.update(
+                {"year": before_year}) or [])
+
+        path = make_pdf(
+            tmp_path / "dated.pdf",
+            ["arXiv:1611.07004v3  [cs.CV]  26 Nov 2018", "1. Introduction"]
+            + [f"Body line {i} with enough text to pass." for i in range(8)],
+            bold_indices=(1,),
+        )
+        with open(path, "rb") as handle:
+            api_client.post("/upload", files={
+                "file": ("dated.pdf", handle.read(), "application/pdf")})
+        assert captured.get("year") == 2016
+
+
 class TestDeleteDuringAnalysis:
     """Found by deleting a paper while its agents were running: the guard ran
     before each agent but the insert happened two minutes later, so the delete

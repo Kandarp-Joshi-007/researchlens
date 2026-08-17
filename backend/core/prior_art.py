@@ -32,8 +32,18 @@ def _clean_query(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()[:250]
 
 
-def find_similar_works(title: str, abstract: str = "", limit: int = 8) -> List[dict]:
+def find_similar_works(title: str, abstract: str = "", limit: int = 8,
+                       before_year: Optional[int] = None) -> List[dict]:
     """Published work similar to this paper, most cited first.
+
+    `before_year` restricts results to work published no later than that year.
+    Without it the search returns whatever is most relevant, which for a 2016
+    paper included 2019 and 2020 work — papers that cite it rather than precede
+    it. Nothing published after a paper can bear on its novelty, so feeding
+    those to the patentability agent as "prior art" is simply wrong.
+
+    The bound is inclusive because only the year is known: same-year work may
+    well have come first, and wrongly hiding real prior art is the worse error.
 
     Returns an empty list on any failure — offline use stays fully functional.
     """
@@ -50,6 +60,8 @@ def find_similar_works(title: str, abstract: str = "", limit: int = 8) -> List[d
         "select": "id,title,publication_year,cited_by_count,doi,authorships,primary_location",
         "sort": "relevance_score:desc",
     }
+    if before_year:
+        params["filter"] = f"to_publication_date:{int(before_year)}-12-31"
     headers = {"User-Agent": f"ResearchLens/1.0 ({CONTACT_EMAIL or 'local install'})"}
     if CONTACT_EMAIL:
         params["mailto"] = CONTACT_EMAIL

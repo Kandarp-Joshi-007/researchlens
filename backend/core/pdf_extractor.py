@@ -7,6 +7,7 @@ with a numbering pattern rather than font size.
 
 import re
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -310,9 +311,58 @@ def _extract(doc, pdf_path: str) -> dict:
         "sections_ordered": sections_ordered,
         "title": title,
         "author": author,
+        "year": _publication_year(doc),
         "page_count": page_count,
         "char_count": len(full_text),
     }
+
+
+# arXiv identifiers encode the original submission month: 1611.07004 is
+# November 2016, regardless of which revision this PDF happens to be.
+_ARXIV_ID = re.compile(r"arXiv:\s*(\d{2})(\d{2})\.\d{4,5}", re.I)
+
+# "Received: 5 August 2024", "Published: 4 September 2024".
+_DATED_LINE = re.compile(
+    r"(?:published|received|accepted|revised)\b[^\n]{0,40}?(19|20)(\d{2})", re.I)
+
+_COPYRIGHT_YEAR = re.compile(r"(?:©|\(c\)|copyright)\s*(19|20)(\d{2})", re.I)
+
+
+def _publication_year(doc) -> Optional[int]:
+    """Best estimate of when the paper was published, or None.
+
+    Used to keep prior-art retrieval to work that could actually be prior art.
+    Sources are tried most-trustworthy first; PDF metadata comes last because it
+    records when the file was written, which can be a decade off — one arXiv
+    preprint here reports 2026 for a 2016 paper because it was re-saved on
+    download. That error direction is safe: a too-late year only widens the
+    search back to its unfiltered behaviour, while a too-early one would hide
+    genuine prior art.
+    """
+    upper = datetime.now().year + 1
+    text = doc[0].get_text() if doc.page_count else ""
+
+    match = _ARXIV_ID.search(text)
+    if match:
+        year = 2000 + int(match.group(1))
+        if 2007 <= year <= upper:  # the YYMM.NNNNN scheme starts in 2007
+            return year
+
+    for pattern in (_DATED_LINE, _COPYRIGHT_YEAR):
+        found = pattern.search(text)
+        if found:
+            year = int(found.group(1) + found.group(2))
+            if 1970 <= year <= upper:
+                return year
+
+    stamp = (doc.metadata or {}).get("creationDate") or ""
+    match = re.match(r"D:(\d{4})", stamp)
+    if match:
+        year = int(match.group(1))
+        if 1970 <= year <= upper:
+            return year
+
+    return None
 
 
 def _is_horizontal(line: dict) -> bool:

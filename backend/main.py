@@ -276,6 +276,7 @@ def _run_analysis(paper_id: int, paper_data: dict, run_id: int, samples: int = 1
         works = find_similar_works(
             paper_data.get("title", ""),
             (paper_data.get("sections") or {}).get("abstract", ""),
+            before_year=paper_data.get("year"),
         )
         save_prior_art(paper_id, works)
 
