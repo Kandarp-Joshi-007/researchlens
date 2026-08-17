@@ -28,3 +28,7 @@ desktop.ini
 .claude/
 CLAUDE.md
 PITCH_BRIEFING.html
+
+# Loose screenshots. Images used by the README live in docs/ under a real name.
+Screenshot*.png
+!docs/*.png

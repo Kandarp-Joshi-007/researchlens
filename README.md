@@ -16,6 +16,15 @@ through [Ollama](https://ollama.com), so an unpublished manuscript never leaves
 the machine — which for most technology transfer offices is the difference
 between a tool they can use and one they can't.
 
+![ResearchLens scoring a paper: four weighted dimensions on the left, and the
+patentability agent's rationale, key points and verbatim evidence quotes on the
+right](docs/analysis-view.png)
+
+*Scoring [pix2pix](https://arxiv.org/abs/1611.07004) (Isola et al., 2016). The
+patentability rationale opens by naming the closest retrieved prior art —
+DualGAN — and argues the distinction, and every score carries quotes copied
+verbatim from the paper.*
+
 ---
 
 ## Why
