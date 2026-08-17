@@ -90,6 +90,34 @@ class TestPdfExtraction:
         # The lock is genuinely released: on Windows this fails otherwise.
         Path(path).unlink()
 
+    def test_rotated_margin_stamp_is_not_mistaken_for_the_title(self, tmp_path):
+        """arXiv prints its identifier down the left margin at a larger size
+        than the paper's own title, so 'largest text wins' returned
+        "arXiv:1611.07004v3 [cs.CV] 26 Nov 2018" for every arXiv preprint."""
+        import fitz
+
+        from backend.core.pdf_extractor import extract_text
+
+        path = tmp_path / "preprint.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        # The stamp: bigger than the title, but rotated down the margin.
+        page.insert_text((30, 500), "arXiv:1611.07004v3  [cs.CV]  26 Nov 2018",
+                         fontsize=20, rotate=90)
+        page.insert_text((72, 90), "Image-to-Image Translation with Networks",
+                         fontsize=14, fontname="helvetica-bold")
+        y = 130
+        for i in range(8):
+            page.insert_text((72, y), f"Body line {i} with enough text to pass.",
+                             fontsize=11)
+            y += 16
+        doc.save(str(path))
+        doc.close()
+
+        title = extract_text(str(path))["title"]
+        assert "arXiv" not in title
+        assert "Image-to-Image" in title
+
     def test_encrypted_pdf_reports_the_real_reason(self, tmp_path):
         import fitz
 

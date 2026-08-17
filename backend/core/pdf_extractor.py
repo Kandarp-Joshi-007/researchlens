@@ -315,13 +315,30 @@ def _extract(doc, pdf_path: str) -> dict:
     }
 
 
+def _is_horizontal(line: dict) -> bool:
+    """True for normal left-to-right text.
+
+    PyMuPDF reports writing direction as a unit vector; horizontal text is
+    (1, 0). Rotated text is nearly always a margin stamp rather than content.
+    """
+    direction = line.get("dir") or (1.0, 0.0)
+    return abs(direction[0] - 1.0) < 0.01 and abs(direction[1]) < 0.01
+
+
 def _title_from_layout(doc) -> str:
-    """Largest text on page 1 — used when PDF metadata has no title."""
+    """Largest horizontal text on page 1 — used when PDF metadata has no title.
+
+    Rotated text is excluded. arXiv stamps its identifier down the left margin
+    at a larger size than the title itself, so 'largest text wins' returned
+    "arXiv:1611.07004v3 [cs.CV] 26 Nov 2018" instead of the paper's name.
+    """
     if doc.page_count == 0:
         return ""
     spans = []
     for block in doc[0].get_text("dict")["blocks"]:
         for line in block.get("lines", []):
+            if not _is_horizontal(line):
+                continue
             for span in line["spans"]:
                 text = span["text"].strip()
                 if len(text) > 8:
