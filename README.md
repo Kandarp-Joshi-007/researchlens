@@ -4,7 +4,7 @@
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-140%20passing-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-150%20passing-brightgreen.svg)](tests/)
 
 ResearchLens takes a PDF of an academic paper and produces a structured
 commercialisation assessment: four scored dimensions, a rationale for each,
@@ -20,10 +20,10 @@ between a tool they can use and one they can't.
 patentability agent's rationale, key points and verbatim evidence quotes on the
 right](docs/analysis-view.png)
 
-*Scoring [pix2pix](https://arxiv.org/abs/1611.07004) (Isola et al., 2016). The
-patentability rationale opens by naming the closest retrieved prior art —
-DualGAN — and argues the distinction, and every score carries quotes copied
-verbatim from the paper.*
+*Scoring [pix2pix](https://arxiv.org/abs/1611.07004) (Isola et al., 2016).
+The patentability rationale opens by naming the closest retrieved prior art —
+StackGAN, published the same year — and argues the distinction. Every score
+carries quotes copied verbatim from the paper.*
 
 ---
 
@@ -74,7 +74,8 @@ result can't silently deflate into a misleading verdict.
    stripped, two-column layouts restored to reading order.
 3. **Embedding** — overlapping 800-word chunks vectorised locally into ChromaDB.
 4. **Prior-art lookup** — the title is searched against
-   [OpenAlex](https://openalex.org) for genuinely similar published work.
+   [OpenAlex](https://openalex.org), restricted to work published no later than
+   the paper itself.
 5. **Scoring** — four agents, each retrieving the passages relevant to its own
    concerns, each returning schema-validated structured output.
 6. **Verdict** — weighted, banded, stored as a versioned run.
@@ -127,7 +128,7 @@ local install. Loaded at import time, so changes need a restart.
 ## Tests
 
 ```bash
-python -m pytest        # 140 tests, ~12s
+python -m pytest        # 150 tests, ~13s
 ```
 
 The suite stubs the language model and the network, so it runs anywhere without
@@ -165,6 +166,18 @@ files — so selecting four PDFs started four simultaneous analyses, exactly the
 thrashing the sequential design existed to prevent. Analyses now queue behind a
 lock, with a cap on how many may queue, because a waiting analysis occupies a
 worker thread the API endpoints also draw on.
+
+**Prior art has to predate the paper.** Retrieval sorted purely by relevance, so
+for a 2016 paper all six results were published later — 2017 to 2020 — including
+the one the agent named as "the closest prior art". Nothing published after a
+paper can bear on its novelty. Adding a date filter took results postdating the
+paper from six of six to zero of eight, and moved its patentability score from
+6.0 to 8.0.
+
+**The largest text on page one isn't always the title.** arXiv prints its
+identifier down the left margin at 20pt, larger than the paper's own 14.3pt
+title, so every arXiv preprint was titled `arXiv:1611.07004v3 [cs.CV] 26 Nov
+2018`. Rotated text is now excluded from title detection.
 
 **Evidence quotes are mandatory output.** They make a score checkable in seconds
 and are the practical defence against a plausible-sounding invented rationale.
