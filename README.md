@@ -27,6 +27,12 @@ carries quotes copied verbatim from the paper.*
 
 ---
 
+### Demo
+
+[**▶ Watch a two-minute walkthrough**](docs/demo.mp4) — uploading a paper, the
+agents running in sequence, and the finished assessment with its evidence
+quotes and retrieved prior art.
+
 ## Why
 
 A technology transfer office decides which research is worth patenting,

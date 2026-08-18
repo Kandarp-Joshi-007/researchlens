@@ -14,8 +14,9 @@ uploads/
 data/chroma/
 data/*.db
 
-# Large binaries
+# Large binaries. The compressed demo in docs/ is the exception.
 *.mp4
+!docs/*.mp4
 *.pdf
 
 # Editors / OS
